@@ -25,7 +25,7 @@ export async function GET() {
 
     const applications = await prisma.application.findMany({
       where: { userId: user.id },
-      include: { job: true },
+      include: { job: true, pausedApplication: true },
       orderBy: { createdAt: 'desc' },
     })
 

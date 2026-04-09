@@ -52,6 +52,19 @@ model Application {
   job             Job               @relation(fields: [jobId], references: [id])
 
   @@unique([userId, jobId])
+  pausedApplication PausedApplication?
+}
+
+model PausedApplication {
+  id               String      @id @default(cuid())
+  applicationId    String      @unique
+  jobId            String
+  pendingQuestions String      // JSON: [{fieldLabel, fieldType, selector}]
+  pageUrl          String
+  cookieState      String      // JSON: serialized Playwright cookies
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  application      Application @relation(fields: [applicationId], references: [id])
 }
 
 enum AtsType {
@@ -67,4 +80,5 @@ enum ApplicationStatus {
   APPLIED
   FAILED
   NEEDS_REVIEW
+  NEEDS_INFO
 }

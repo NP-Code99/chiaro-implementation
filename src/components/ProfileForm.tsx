@@ -14,6 +14,7 @@ const EMPTY: UserProfile = {
   workAuth: 'US Citizen', yearsExp: '1-3',
   resumeBase64: '', resumeFilename: '',
   bio: '',
+  applicationPassword: '',
 }
 
 export function ProfileForm() {

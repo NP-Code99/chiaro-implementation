@@ -4,6 +4,15 @@ import type { UserProfile } from '@/lib/userProfile'
 import type { Job } from '@prisma/client'
 import { AtsType } from '@prisma/client'
 
+// Mock browserApply so tests don't spin up a real Playwright browser
+vi.mock('@/lib/browserApply', () => ({
+  browserApply: vi.fn().mockResolvedValue({
+    status: 'needs_review',
+    errorMessage: 'browser automation required',
+    applyUrl: 'https://example.com',
+  }),
+}))
+
 const PROFILE: UserProfile = {
   firstName: 'Ada',
   lastName: 'Lovelace',
@@ -17,6 +26,7 @@ const PROFILE: UserProfile = {
   resumeBase64: 'data:application/pdf;base64,JVBERi0x',
   resumeFilename: 'ada-resume.pdf',
   bio: 'Great engineer.',
+  applicationPassword: 'Chiaro12345678!',
 }
 
 function makeJob(overrides: Partial<Job> = {}): Job {

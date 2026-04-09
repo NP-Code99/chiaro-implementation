@@ -30,6 +30,11 @@ const STATUS_CONFIG: Record<
     bg: 'oklch(72% 0.18 75 / 0.15)',
     color: 'oklch(72% 0.18 75)',
   },
+  NEEDS_INFO: {
+    label: 'Needs Input',
+    bg: 'oklch(65% 0.2 290 / 0.15)',
+    color: 'oklch(65% 0.2 290)',
+  },
 }
 
 interface StatusBadgeProps {

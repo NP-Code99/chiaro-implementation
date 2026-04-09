@@ -20,6 +20,7 @@ const FULL_PROFILE: UserProfile = {
   resumeBase64: 'data:application/pdf;base64,JVBERi0x',
   resumeFilename: 'ada-resume.pdf',
   bio: 'Passionate engineer with 6 years of experience.',
+  applicationPassword: 'Chiaro12345678!',
 }
 
 // Mock localStorage

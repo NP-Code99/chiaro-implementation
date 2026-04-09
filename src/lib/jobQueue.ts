@@ -8,6 +8,7 @@ import { prisma } from '@/lib/db'
 import { applyToJob } from '@/lib/applyEngine'
 import { ApplicationStatus } from '@prisma/client'
 import type { UserProfile } from './userProfile'
+import type { BrowserApplyResult } from './browserApply'
 
 const DELAY_MS = 2000
 const queue: string[] = []
@@ -47,11 +48,13 @@ async function processNext(): Promise<void> {
 
     await prisma.application.update({ where: { id }, data: { status: ApplicationStatus.APPLYING } })
 
-    const result = await applyToJob(application.job, profile, id)
+    const result = await applyToJob(application.job, profile, id) as BrowserApplyResult
 
     const nextStatus =
       result.status === 'applied'
         ? ApplicationStatus.APPLIED
+        : result.pendingQuestions && result.pendingQuestions.length > 0
+        ? ApplicationStatus.NEEDS_INFO   // already written by browserApply, just align here
         : result.status === 'needs_review'
         ? ApplicationStatus.NEEDS_REVIEW
         : ApplicationStatus.FAILED

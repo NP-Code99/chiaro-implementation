@@ -14,6 +14,12 @@ export interface UserProfile {
   resumeBase64: string
   resumeFilename: string
   bio: string
+  applicationPassword: string  // Used for ATS account creation fields — not a security credential
+}
+
+export function generateApplicationPassword(): string {
+  const digits = Math.floor(10000000 + Math.random() * 90000000).toString()
+  return `Chiaro${digits}!`
 }
 
 const STORAGE_KEY = 'chiaro_user_profile'
