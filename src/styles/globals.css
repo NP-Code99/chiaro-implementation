@@ -1,0 +1,172 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* Palette */
+  --color-bg: oklch(10% 0.01 240);
+  --color-surface: oklch(14% 0.015 240);
+  --color-surface-elevated: oklch(18% 0.02 240);
+  --color-border: oklch(25% 0.02 240);
+  --color-border-subtle: oklch(20% 0.015 240);
+
+  --color-text: oklch(95% 0.005 240);
+  --color-text-secondary: oklch(65% 0.015 240);
+  --color-text-muted: oklch(45% 0.01 240);
+
+  --color-accent: oklch(62% 0.22 250);
+  --color-accent-hover: oklch(68% 0.24 250);
+  --color-accent-subtle: oklch(62% 0.22 250 / 0.15);
+
+  --color-success: oklch(68% 0.18 145);
+  --color-success-subtle: oklch(68% 0.18 145 / 0.15);
+  --color-warning: oklch(72% 0.18 75);
+  --color-warning-subtle: oklch(72% 0.18 75 / 0.15);
+  --color-error: oklch(62% 0.22 25);
+  --color-error-subtle: oklch(62% 0.22 25 / 0.15);
+
+  /* Typography */
+  --text-xs: clamp(0.7rem, 0.65rem + 0.25vw, 0.75rem);
+  --text-sm: clamp(0.8rem, 0.75rem + 0.25vw, 0.875rem);
+  --text-base: clamp(0.9rem, 0.85rem + 0.25vw, 1rem);
+  --text-lg: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
+  --text-xl: clamp(1.1rem, 1rem + 0.5vw, 1.25rem);
+  --text-2xl: clamp(1.3rem, 1.1rem + 1vw, 1.5rem);
+  --text-3xl: clamp(1.6rem, 1.3rem + 1.5vw, 2rem);
+
+  /* Spacing */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-12: 3rem;
+  --space-16: 4rem;
+
+  /* Radius */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.5rem;
+  --radius-2xl: 2rem;
+  --radius-full: 9999px;
+
+  /* Shadows */
+  --shadow-card: 0 4px 24px oklch(0% 0 0 / 0.4), 0 1px 4px oklch(0% 0 0 / 0.3);
+  --shadow-elevated: 0 8px 40px oklch(0% 0 0 / 0.5), 0 2px 8px oklch(0% 0 0 / 0.3);
+
+  /* Motion */
+  --duration-fast: 120ms;
+  --duration-normal: 220ms;
+  --duration-slow: 400ms;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* Focus ring */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Selection */
+::selection {
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+}
+
+@layer components {
+  .card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-card);
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-full font-semibold text-sm transition-all;
+    background: var(--color-accent);
+    color: white;
+  }
+  .btn-primary:hover {
+    background: var(--color-accent-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 16px var(--color-accent-subtle);
+  }
+  .btn-primary:active {
+    transform: translateY(0);
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-full text-sm transition-all;
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border-subtle);
+  }
+  .btn-ghost:hover {
+    color: var(--color-text);
+    background: var(--color-surface-elevated);
+    border-color: var(--color-border);
+  }
+
+  .tag {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+    background: var(--color-surface-elevated);
+    color: var(--color-text-secondary);
+    border: 1px solid var(--color-border-subtle);
+  }
+
+  .input {
+    @apply w-full px-3 py-2.5 text-sm rounded-lg transition-all;
+    background: var(--color-surface-elevated);
+    border: 1px solid var(--color-border-subtle);
+    color: var(--color-text);
+  }
+  .input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px var(--color-accent-subtle);
+  }
+  .input::placeholder {
+    color: var(--color-text-muted);
+  }
+}
