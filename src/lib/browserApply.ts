@@ -1,4 +1,5 @@
 import { chromium } from 'playwright'
+import Steel from 'steel-sdk'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -337,58 +338,32 @@ export async function browserApply(
   userAnswers: Record<string, string> = {},
 ): Promise<BrowserApplyResult> {
   const tempFiles: string[] = []
-  let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let browser: any = null
+  let steelSessionId: string | null = null
+
+  const steel = new Steel({ steelAPIKey: process.env.STEEL_API_KEY })
 
   const run = async (): Promise<BrowserApplyResult> => {
-    browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-blink-features=AutomationControlled',
-        '--disable-infobars',
-      ],
-    })
-    const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 900 },
-      locale: 'en-US',
-      timezoneId: 'America/New_York',
-      extraHTTPHeaders: {
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    })
+    // Create a Steel cloud browser session — handles Cloudflare bypass automatically
+    const session = await steel.sessions.create()
+    steelSessionId = session.id
 
-    // Spoof navigator.webdriver before any page script runs
-    await context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => false })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Array
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Promise
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Symbol
-    })
-
+    // Connect Playwright to the remote Steel browser via CDP
+    // API key must be appended to the URL for auth
+    const cdpUrl = `${session.websocketUrl}&apiKey=${process.env.STEEL_API_KEY}`
+    browser = await chromium.connectOverCDP(cdpUrl)
+    const context = browser.contexts()[0] ?? await browser.newContext()
     const page = await context.newPage()
 
-    // Navigate
+    // Navigate — Steel handles Cloudflare/CAPTCHA bypass automatically
     await page.goto(applyUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
     await page.waitForTimeout(3000).catch(() => {})
 
-    // Cloudflare / CAPTCHA check
+    // Sanity check: if still blocked after Steel's bypass attempt, fail gracefully
     const bodyText = await page.evaluate(() => document.body.innerText)
-    if (CLOUDFLARE_PATTERNS.test(bodyText)) {
-      const screenshotUrl = await takeScreenshot(page, applicationId)
-      return {
-        status: 'needs_review',
-        errorMessage: 'Cloudflare bot protection blocked the request — Wellfound requires a real browser session. Complete this application manually.',
-        applyUrl,
-        screenshotUrl,
-      }
-    }
     if (CAPTCHA_PATTERNS.test(bodyText)) {
-      return { status: 'needs_review', errorMessage: 'CAPTCHA detected — complete manually', applyUrl }
+      return { status: 'needs_review', errorMessage: 'CAPTCHA or bot challenge remained after bypass attempt — complete manually', applyUrl }
     }
 
     // Extract resume text once
@@ -542,7 +517,12 @@ export async function browserApply(
       applyUrl,
     }
   } finally {
-    await (browser as Awaited<ReturnType<typeof chromium.launch>> | null)?.close()
+    // Disconnect Playwright from Steel (does not kill the remote session)
+    await browser?.close().catch(() => {})
+    // Release the Steel session to stop credit usage
+    if (steelSessionId) {
+      await steel.sessions.release(steelSessionId).catch(() => {})
+    }
     for (const f of tempFiles) {
       try { fs.unlinkSync(f) } catch { /* ignore */ }
     }
