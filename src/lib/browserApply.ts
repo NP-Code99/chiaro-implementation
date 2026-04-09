@@ -21,7 +21,8 @@ const SUCCESS_PATTERNS = [
   /we\s*have\s*received\s*your/i,
 ]
 
-const CAPTCHA_PATTERNS = /captcha|recaptcha|hcaptcha/i
+const CAPTCHA_PATTERNS = /captcha|recaptcha|hcaptcha|verify you are human|checking if the site connection is secure|just a moment|enable javascript and cookies/i
+const CLOUDFLARE_PATTERNS = /checking if the site connection is secure|verify you are human|ray id:/i
 
 // ── Field descriptor ─────────────────────────────────────────────────────────
 
@@ -339,15 +340,53 @@ export async function browserApply(
   let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null
 
   const run = async (): Promise<BrowserApplyResult> => {
-    browser = await chromium.launch({ headless: true })
-    const page = await browser.newPage()
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-infobars',
+      ],
+    })
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      viewport: { width: 1280, height: 900 },
+      locale: 'en-US',
+      timezoneId: 'America/New_York',
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    })
+
+    // Spoof navigator.webdriver before any page script runs
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Array
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Promise
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (window as any).cdc_adoQpoasnfa76pfcZLmcfl_Symbol
+    })
+
+    const page = await context.newPage()
 
     // Navigate
-    await page.goto(applyUrl, { waitUntil: 'domcontentloaded', timeout: 20000 })
-    await page.waitForTimeout(2000).catch(() => {})
+    await page.goto(applyUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await page.waitForTimeout(3000).catch(() => {})
 
-    // CAPTCHA check
+    // Cloudflare / CAPTCHA check
     const bodyText = await page.evaluate(() => document.body.innerText)
+    if (CLOUDFLARE_PATTERNS.test(bodyText)) {
+      const screenshotUrl = await takeScreenshot(page, applicationId)
+      return {
+        status: 'needs_review',
+        errorMessage: 'Cloudflare bot protection blocked the request — Wellfound requires a real browser session. Complete this application manually.',
+        applyUrl,
+        screenshotUrl,
+      }
+    }
     if (CAPTCHA_PATTERNS.test(bodyText)) {
       return { status: 'needs_review', errorMessage: 'CAPTCHA detected — complete manually', applyUrl }
     }
@@ -376,8 +415,6 @@ export async function browserApply(
       }
     } catch { /* non-fatal */ }
 
-    const isWellfound = /wellfound\.com/i.test(applyUrl)
-
     for (let step = 0; step < MAX_STEPS; step++) {
       const currentText = await page.evaluate(() => document.body.innerText)
 
@@ -387,16 +424,12 @@ export async function browserApply(
         return { status: 'applied', applyUrl, screenshotUrl }
       }
 
-      // Extract and classify fields
-      const rawFields = isWellfound
-        ? classifyWellfoundFields(profile).map(c => c.field)
-        : await extractAllFields(page)
+      // Extract and classify fields (generic for all sites)
+      const rawFields = await extractAllFields(page)
 
       if (rawFields.length === 0) break
 
-      const classified = isWellfound
-        ? classifyWellfoundFields(profile)
-        : classifyFields(rawFields, profile)
+      const classified = classifyFields(rawFields, profile)
 
       // Check for Bucket C fields
       const bucketC = classified.filter(c => c.bucket === 'C')
@@ -452,7 +485,10 @@ export async function browserApply(
 
       // Look for Submit
       const submitBtn = await page.$(
-        'button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("Apply Now"), button:has-text("Send Application")'
+        'button[type="submit"], input[type="submit"], ' +
+        'button:has-text("Submit"), button:has-text("Apply Now"), button:has-text("Send Application"), ' +
+        'button:has-text("Apply"), button:has-text("Submit Application"), button:has-text("Send"), ' +
+        'button:has-text("Complete Application"), button:has-text("Finish")'
       )
       if (submitBtn) {
         await submitBtn.click()
