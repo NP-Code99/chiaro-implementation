@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { applyToJob, type ApplicationResult } from '@/lib/applyEngine'
 import type { UserProfile } from '@/lib/userProfile'
 import type { Job } from '@prisma/client'
-import { AtsType } from '@prisma/client'
+import { AtsType } from '../../src/lib/prismaEnums'
 
 // Mock browserApply so tests don't spin up a real Playwright browser
 vi.mock('@/lib/browserApply', () => ({
@@ -23,6 +23,7 @@ const PROFILE: UserProfile = {
   location: 'San Francisco, CA',
   workAuth: 'US Citizen',
   yearsExp: '5-8',
+  desiredSalary: '160000',
   resumeBase64: 'data:application/pdf;base64,JVBERi0x',
   resumeFilename: 'ada-resume.pdf',
   bio: 'Great engineer.',
@@ -38,11 +39,14 @@ function makeJob(overrides: Partial<Job> = {}): Job {
     applyUrl: 'https://boards.greenhouse.io/testco/jobs/123',
     atsType: AtsType.GREENHOUSE,
     location: 'Remote',
+    status: 'active',
     salaryMin: 150000,
     salaryMax: 200000,
-    tags: ['Remote', 'TypeScript'],
+    tags: JSON.stringify(['Remote', 'TypeScript']),
     logoUrl: null,
     manualReviewReason: null,
+    source: 'startup.jobs',
+    sourceUrl: null,
     createdAt: new Date(),
     ...overrides,
   }

@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -19,37 +19,65 @@ model User {
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
   applications Application[]
+
+  // Wellfound account credentials
+  wellfoundEmail        String?
+  wellfoundPassword     String?
+  hasWellfoundAccount   Boolean  @default(false)
+
+  // Google credentials for Google login
+  googleEmail           String?
+  googlePassword        String?
+  useGoogleLogin        Boolean  @default(false)
+
+  // Application password for new account creation
+  applicationPassword   String   @default("Chiaro2024!!")
+
+  // Wellfound session cookie cache (captured after first login)
+  wellfoundSessionCookies  String?    // AES-256-CBC encrypted JSON array of cookies
+  wellfoundSessionExpiry   DateTime?  // When the session expires (default 7 days)
+  wellfoundSessionValid    Boolean    @default(false)
+  preferredLoginMethod     String     @default("direct") // direct | google | session
 }
 
 model Job {
-  id           String        @id @default(cuid())
-  company      String
-  role         String
-  description  String
-  applyUrl     String
-  atsType      AtsType
-  location     String
-  salaryMin    Int?
-  salaryMax    Int?
-  tags               String[]
+  id                 String        @id @default(cuid())
+  company            String
+  role               String
+  description        String
+  applyUrl           String
+  atsType            String        // GREENHOUSE | LEVER | WORKDAY | CUSTOM | STARTUP_JOBS_NATIVE | SMARTRECRUITERS | JOBVITE | ICIMS | TALEO
+  location           String
+  status             String        @default("active") // active | broken | skipped
+  salaryMin          Int?
+  salaryMax          Int?
+  tags               String        @default("[]") // JSON array stored as string
   logoUrl            String?
-  manualReviewReason String?   // Set when a fillability check determines the form can't be auto-filled
+  manualReviewReason String?
+  source             String        @default("wellfound") // wellfound | startup.jobs
+  sourceUrl          String?       @unique                // stable dedup key (job page URL)
   createdAt          DateTime      @default(now())
   applications       Application[]
 }
 
 model Application {
-  id              String            @id @default(cuid())
+  id              String   @id @default(cuid())
   userId          String
   jobId           String
-  status          ApplicationStatus @default(PENDING)
+  status          String   @default("PENDING") // PENDING | APPLYING | APPLIED | FAILED | NEEDS_REVIEW | NEEDS_INFO | VERIFICATION_PENDING
   errorMessage    String?
+  errorCode       String?  // B1–B8 for broken job skips
   appliedAt       DateTime?
-  profileSnapshot String?           // JSON snapshot of UserProfile at time of apply
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  user            User              @relation(fields: [userId], references: [id])
-  job             Job               @relation(fields: [jobId], references: [id])
+  profileSnapshot String?
+  bypassMethod    String?
+  steelSessionId  String?
+  loginPathway    String?  // new_user | existing_wellfound | google | unknown
+  verificationCode    String?    // User-entered 2FA code (set via /api/applications/[id]/verify)
+  verificationExpiry  DateTime?  // When the 2FA prompt expires (10 min window)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id])
+  job             Job      @relation(fields: [jobId], references: [id])
 
   @@unique([userId, jobId])
   pausedApplication PausedApplication?
@@ -59,26 +87,10 @@ model PausedApplication {
   id               String      @id @default(cuid())
   applicationId    String      @unique
   jobId            String
-  pendingQuestions String      // JSON: [{fieldLabel, fieldType, selector}]
+  pendingQuestions String
   pageUrl          String
-  cookieState      String      // JSON: serialized Playwright cookies
+  cookieState      String
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
   application      Application @relation(fields: [applicationId], references: [id])
-}
-
-enum AtsType {
-  GREENHOUSE
-  LEVER
-  WORKDAY
-  CUSTOM
-}
-
-enum ApplicationStatus {
-  PENDING
-  APPLYING
-  APPLIED
-  FAILED
-  NEEDS_REVIEW
-  NEEDS_INFO
 }

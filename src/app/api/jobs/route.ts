@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { fetchWellfoundJobs } from '@/lib/wellfound'
+import { fetchStartupJobs } from '@/lib/startupJobs'
 
 const DEFAULT_USER_ID = 'demo-user'
-const CACHE_TTL_MS = 10 * 60 * 1000 // 10 minutes
+// 2 hours — keeps daily Apify runs well under quota
+const CACHE_TTL_MS = 2 * 60 * 60 * 1000
 
 let cachedJobIds: string[] | null = null
 let cacheExpiresAt = 0
@@ -12,36 +13,43 @@ async function warmCacheIfStale(): Promise<void> {
   if (cachedJobIds && Date.now() < cacheExpiresAt) return
 
   try {
-    const jobs = await fetchWellfoundJobs({ maxResults: 60 })
+    const jobs = await fetchStartupJobs({ maxResults: 60 })
 
-    // Upsert into DB using wellfoundId as stable key
+    if (jobs.length === 0) {
+      console.warn('[jobs/route] Startup.jobs returned 0 jobs — quota may be exceeded, retrying in 1h')
+      cacheExpiresAt = Date.now() + 60 * 60 * 1000
+      return
+    }
+
+    // Upsert into DB using sourceUrl as stable dedup key
     const upserts = jobs.map(j =>
       prisma.job.upsert({
-        where: { id: j.wellfoundId },
+        where: { sourceUrl: j.sourceUrl },
         update: {
-          company: j.company,
-          role: j.role,
+          company:     j.company,
+          role:        j.role,
           description: j.description,
-          applyUrl: j.applyUrl,
-          atsType: j.atsType,
-          location: j.location,
-          salaryMin: j.salaryMin,
-          salaryMax: j.salaryMax,
-          tags: j.tags,
-          logoUrl: j.logoUrl,
+          applyUrl:    j.applyUrl,
+          atsType:     j.atsType,
+          location:    j.location,
+          salaryMin:   j.salaryMin,
+          salaryMax:   j.salaryMax,
+          tags:        JSON.stringify(j.tags ?? []),
+          logoUrl:     j.logoUrl,
         },
         create: {
-          id: j.wellfoundId,
-          company: j.company,
-          role: j.role,
+          company:     j.company,
+          role:        j.role,
           description: j.description,
-          applyUrl: j.applyUrl,
-          atsType: j.atsType,
-          location: j.location,
-          salaryMin: j.salaryMin,
-          salaryMax: j.salaryMax,
-          tags: j.tags,
-          logoUrl: j.logoUrl,
+          applyUrl:    j.applyUrl,
+          atsType:     j.atsType,
+          location:    j.location,
+          salaryMin:   j.salaryMin,
+          salaryMax:   j.salaryMax,
+          tags:        JSON.stringify(j.tags ?? []),
+          logoUrl:     j.logoUrl,
+          source:      j.source,
+          sourceUrl:   j.sourceUrl,
         },
       })
     )
@@ -50,7 +58,7 @@ async function warmCacheIfStale(): Promise<void> {
     cachedJobIds = upserted.map(j => j.id)
     cacheExpiresAt = Date.now() + CACHE_TTL_MS
   } catch (err) {
-    console.error('[jobs/route] Wellfound fetch failed, serving DB data:', err)
+    console.error('[jobs/route] Startup.jobs fetch failed, serving DB data:', err)
     // Don't update cache — fall through to DB query below
   }
 }
@@ -69,7 +77,7 @@ export async function GET() {
       })
     }
 
-    // Try to warm the Wellfound cache (no-op if still fresh)
+    // Try to warm the Startup.jobs cache (no-op if still fresh)
     await warmCacheIfStale()
 
     // Return jobs the user hasn't applied to or skipped

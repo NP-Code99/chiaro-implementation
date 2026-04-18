@@ -114,6 +114,13 @@ export async function applyToJob(job: Job, profile: UserProfile, applicationId: 
     case 'LEVER':
       return applyLever(job, profile)
     case 'WORKDAY':
+    case 'ASHBY':
+    case 'BAMBOOHR':
+    case 'SMARTRECRUITERS':
+    case 'JOBVITE':
+    case 'ICIMS':
+    case 'TALEO':
+    case 'STARTUP_JOBS_NATIVE':
     case 'CUSTOM':
     default:
       return browserApply(job.applyUrl, profile, applicationId)
