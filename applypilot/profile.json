@@ -1,0 +1,49 @@
+{
+  "name": "Nandan Pullakandam",
+  "firstName": "Nandan",
+  "lastName": "Pullakandam",
+  "email": "nandanpu@unc.edu",
+  "phone": "+1 919 555 0142",
+  "location": "Chapel Hill, NC",
+  "linkedin": "",
+  "github": "",
+  "portfolio": "",
+  "work_authorization": "US Citizen",
+  "desired_salary_min": 120000,
+  "desired_salary_max": 180000,
+  "remote_preference": "any",
+  "years_experience": 3,
+  "summary": "Software engineer with experience building full-stack web applications and automation systems. Strong background in TypeScript, Python, React, and Next.js. Passionate about AI-driven tooling and developer productivity.",
+  "skills": [
+    "TypeScript", "Python", "React", "Next.js", "Node.js",
+    "PostgreSQL", "Playwright", "OpenAI API", "Anthropic API",
+    "Prisma", "REST APIs", "AWS", "Docker"
+  ],
+  "experience": [
+    {
+      "title": "Software Engineer",
+      "company": "Independent / Freelance",
+      "start": "2023-01",
+      "end": "present",
+      "bullets": [
+        "Built autonomous job application pipeline using Python, Playwright, and Claude AI",
+        "Developed full-stack SaaS application (Chiaro) with Next.js, Prisma, and PostgreSQL",
+        "Integrated AI form-filling automation with anti-detection and session persistence"
+      ]
+    }
+  ],
+  "education": [
+    {
+      "degree": "B.S. Computer Science",
+      "school": "University of North Carolina at Chapel Hill",
+      "year": 2024,
+      "gpa": ""
+    }
+  ],
+  "eeo": {
+    "gender": "Prefer not to say",
+    "ethnicity": "Prefer not to say",
+    "veteran": "No",
+    "disability": "No"
+  }
+}

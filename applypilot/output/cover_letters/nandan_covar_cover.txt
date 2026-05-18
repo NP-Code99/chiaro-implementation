@@ -1,0 +1,10 @@
+I am writing to apply for the Machine Learning Engineer position at CoVar.
+CoVar's mission of building reliable, verifiable AI for defense and national security applications aligns closely
+with my passion for building systems that are both powerful and trustworthy.
+
+My background in Python-driven automation, AI integration (OpenAI, Anthropic), and full-stack development
+gives me a strong foundation to contribute to CoVar's ML engineering work. I have hands-on experience
+designing and shipping AI pipelines end-to-end, from data ingestion through inference and deployment.
+
+I am a US citizen, based near North Carolina, and excited about the opportunity to work on mission-critical
+AI at CoVar. I would welcome the chance to discuss how my skills align with your team's needs.

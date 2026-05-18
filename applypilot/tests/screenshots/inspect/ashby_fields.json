@@ -1,0 +1,184 @@
+{
+  "fields": [
+    {
+      "tag": "input",
+      "type": "file",
+      "id": "",
+      "name": "",
+      "placeholder": "",
+      "required": false,
+      "aria-haspopup": null,
+      "aria-controls": null,
+      "class": "",
+      "label": "Name",
+      "value": ""
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "_systemfield_name",
+      "name": "_systemfield_name",
+      "placeholder": "Type here...",
+      "required": true,
+      "aria-haspopup": null,
+      "aria-controls": null,
+      "class": "_input_1wkz4_28 _input_17tft_33",
+      "label": "Name",
+      "value": ""
+    },
+    {
+      "tag": "input",
+      "type": "email",
+      "id": "_systemfield_email",
+      "name": "_systemfield_email",
+      "placeholder": "hello@example.com...",
+      "required": true,
+      "aria-haspopup": null,
+      "aria-controls": null,
+      "class": "_input_1wkz4_28 _input_17tft_33",
+      "label": "Email",
+      "value": ""
+    },
+    {
+      "tag": "input",
+      "type": "file",
+      "id": "_systemfield_resume",
+      "name": "",
+      "placeholder": "",
+      "required": true,
+      "aria-haspopup": null,
+      "aria-controls": null,
+      "class": "",
+      "label": "Resume",
+      "value": ""
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "3ec70f81-801d-4373-8c05-67c463406363",
+      "name": "3ec70f81-801d-4373-8c05-67c463406363",
+      "placeholder": "Type here...",
+      "required": false,
+      "aria-haspopup": null,
+      "aria-controls": null,
+      "class": "_input_1wkz4_28 _input_17tft_33",
+      "label": "LinkedIn profile",
+      "value": ""
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "ced81a08-85f8-439e-a5ed-356fa73513ab",
+      "name": "ced81a08-85f8-439e-a5ed-356fa73513ab",
+      "placeholder": "Type here...",
+      "required": false,
+      "aria-haspopup": null,
+      "aria-controls": null,
+      "class": "_input_1wkz4_28 _input_17tft_33",
+      "label": "Twitter handle",
+      "value": ""
+    },
+    {
+      "tag": "input",
+      "type": "checkbox",
+      "id": "",
+      "name": "513d934d-4bfc-4a16-b49e-f22c0b6fc156",
+      "placeholder": "",
+      "required": false,
+      "aria-haspopup": null,
+      "aria-controls": null,
+      "class": "_input_y2cw4_79",
+      "label": "Are you based in Australia?",
+      "value": "on"
+    },
+    {
+      "tag": "input",
+      "type": "text",
+      "id": "",
+      "name": "",
+      "placeholder": "Start typing...",
+      "required": false,
+      "aria-haspopup": "listbox",
+      "aria-controls": null,
+      "class": "_input_v5ami_28",
+      "label": "If you are based in Australia, in which region are you located?",
+      "value": ""
+    },
+    {
+      "tag": "textarea",
+      "id": "a0bc5b99-38f7-4cac-ab61-69940204a91b",
+      "name": "a0bc5b99-38f7-4cac-ab61-69940204a91b",
+      "required": true,
+      "class": "_input_1wnh2_29 _input_17tft_33 ",
+      "label": "Cover letter"
+    },
+    {
+      "tag": "textarea",
+      "id": "g-recaptcha-response-100000",
+      "name": "g-recaptcha-response",
+      "required": false,
+      "class": "g-recaptcha-response",
+      "label": "Name"
+    }
+  ],
+  "buttons": [
+    {
+      "tag": "button",
+      "type": "submit",
+      "text": "Upload file",
+      "id": "",
+      "class": "_button_8wvgw_29 _secondary_8wvgw_114    _ctaButton_xd2v0_94"
+    },
+    {
+      "tag": "button",
+      "type": "submit",
+      "text": "Upload File",
+      "id": "",
+      "class": "_button_8wvgw_29 _secondary_8wvgw_114    _button_1fd3o_107"
+    },
+    {
+      "tag": "button",
+      "type": "submit",
+      "text": "Yes",
+      "id": "",
+      "class": "_container_pjyt6_1 _option_y2cw4_33 "
+    },
+    {
+      "tag": "button",
+      "type": "submit",
+      "text": "No",
+      "id": "",
+      "class": "_container_pjyt6_1 _option_y2cw4_33 "
+    },
+    {
+      "tag": "button",
+      "type": "submit",
+      "text": "Submit Application",
+      "id": "",
+      "class": "_button_8wvgw_29 _primary_8wvgw_96  _greedy_8wvgw_218  _subm"
+    }
+  ],
+  "files": [
+    {
+      "tag": "file",
+      "id": "",
+      "name": "",
+      "accept": "application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.oasis.opendocument.text,.odt,application/rtf,.rtf",
+      "label": "Name"
+    },
+    {
+      "tag": "file",
+      "id": "_systemfield_resume",
+      "name": "",
+      "accept": "application/pdf,.pdf,application/msword,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/vnd.oasis.opendocument.text,.odt,application/rtf,.rtf,image/*,video/*,audio/*",
+      "label": "Resume"
+    }
+  ],
+  "captcha": {
+    "recaptcha": true,
+    "hcaptcha": false,
+    "turnstile": false
+  },
+  "title": "Account Executive, APAC @ Linear",
+  "url": "https://jobs.ashbyhq.com/linear/82778dbf-711e-4d23-9d49-4a60db76737a/application"
+}

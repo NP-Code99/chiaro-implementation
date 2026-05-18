@@ -1,0 +1,18 @@
+Nandan Pullakandam
+nandanpu@unc.edu | Chapel Hill, NC
+
+SUMMARY
+Software engineer with 3 years of experience building full-stack applications and AI-driven automation systems.
+Proficient in Python, TypeScript, React, Next.js, and machine learning tooling.
+
+SKILLS
+Python, TypeScript, React, Next.js, Node.js, PostgreSQL, Playwright, OpenAI API, Anthropic API, Prisma, Docker, AWS
+
+EXPERIENCE
+Software Engineer | Independent / Freelance | 2023 – Present
+- Built autonomous job application pipeline using Python, Playwright, and Claude AI
+- Developed full-stack SaaS (Chiaro) with Next.js, Prisma, PostgreSQL
+- Integrated anti-detection browser automation with session persistence
+
+EDUCATION
+B.S. Computer Science | University of North Carolina at Chapel Hill | 2024

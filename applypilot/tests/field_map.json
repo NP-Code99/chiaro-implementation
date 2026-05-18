@@ -1,0 +1,102 @@
+{
+  "First Name*": {
+    "type": "text",
+    "id": "first_name",
+    "name": ""
+  },
+  "Last Name*": {
+    "type": "text",
+    "id": "last_name",
+    "name": ""
+  },
+  "Preferred First Name": {
+    "type": "text",
+    "id": "preferred_name",
+    "name": ""
+  },
+  "Email*": {
+    "type": "text",
+    "id": "email",
+    "name": ""
+  },
+  "Country*": {
+    "type": "text",
+    "id": "country",
+    "name": ""
+  },
+  "iti-0__search-input": {
+    "type": "search",
+    "id": "iti-0__search-input",
+    "name": ""
+  },
+  "Phone*": {
+    "type": "tel",
+    "id": "phone",
+    "name": ""
+  },
+  "Location (City)*": {
+    "type": "text",
+    "id": "candidate-location",
+    "name": ""
+  },
+  "Attach": {
+    "type": "file",
+    "id": "cover_letter",
+    "name": ""
+  },
+  "LinkedIn Profile": {
+    "type": "text",
+    "id": "question_11705286007",
+    "name": ""
+  },
+  "Are you a US citizen? Eligibility for a US security clearance is required for this role, and that requires US citizenship.*": {
+    "type": "text",
+    "id": "question_11705287007",
+    "name": ""
+  },
+  "Do you live in the Durham, NC area or will you be willing to relocate? Relocation assistance is available.*": {
+    "type": "text",
+    "id": "question_11705288007",
+    "name": ""
+  },
+  "This is an on-site position. We currently have a hybrid policy that asks employees to work in the office at least 3 days per week. Does this work for you?*": {
+    "type": "text",
+    "id": "question_11705289007",
+    "name": ""
+  },
+  "What is the highest level of education you have completed?*": {
+    "type": "text",
+    "id": "question_11705290007",
+    "name": ""
+  },
+  "How many years of work experience do you have with Python (Programming Language)?*": {
+    "type": "text",
+    "id": "question_11705291007",
+    "name": ""
+  },
+  "Gender": {
+    "type": "text",
+    "id": "gender",
+    "name": ""
+  },
+  "Are you Hispanic/Latino?": {
+    "type": "text",
+    "id": "hispanic_ethnicity",
+    "name": ""
+  },
+  "Veteran Status": {
+    "type": "text",
+    "id": "veteran_status",
+    "name": ""
+  },
+  "Disability Status": {
+    "type": "text",
+    "id": "disability_status",
+    "name": ""
+  },
+  "g-recaptcha-response": {
+    "type": "textarea",
+    "id": "g-recaptcha-response-100000",
+    "name": "g-recaptcha-response"
+  }
+}
