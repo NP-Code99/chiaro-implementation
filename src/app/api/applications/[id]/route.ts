@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { enqueue } from '@/lib/jobQueue'
-import { ApplicationStatus } from '@prisma/client'
+import { ApplicationStatus } from '@/lib/prismaEnums'
 
 export async function GET(
   _req: NextRequest,
@@ -40,6 +40,20 @@ export async function PATCH(
         data: { status: ApplicationStatus.PENDING, errorMessage: null },
       })
       enqueue(params.id)
+      return NextResponse.json({ application: updated })
+    }
+
+    if (action === 'skip_verification') {
+      if (application.status !== ApplicationStatus.VERIFICATION_PENDING) {
+        return NextResponse.json({ error: 'Application is not in verification_pending state' }, { status: 400 })
+      }
+      const updated = await prisma.application.update({
+        where: { id: params.id },
+        data: {
+          status: ApplicationStatus.NEEDS_REVIEW,
+          errorMessage: 'Verification skipped — please apply manually.',
+        },
+      })
       return NextResponse.json({ application: updated })
     }
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { enqueue } from '@/lib/jobQueue'
-import { ApplicationStatus } from '@prisma/client'
+import { ApplicationStatus } from '@/lib/prismaEnums'
 
 // Rate limiting: max 10 applications per minute per user
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>()
@@ -57,17 +57,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ application: existing, alreadyExists: true })
     }
 
-    // Strip resumeBase64 before persisting — resume bytes must not sit in the applications table
-    let safeSnapshot: string | null = null
-    if (profileSnapshot) {
-      try {
-        const parsed = JSON.parse(profileSnapshot) as Record<string, unknown>
-        const { resumeBase64: _, ...rest } = parsed
-        safeSnapshot = JSON.stringify(rest)
-      } catch {
-        safeSnapshot = null
-      }
-    }
+    // Keep the full profile snapshot including resumeBase64 — the queue processor needs
+    // the resume bytes to upload the file during form fill. resumeBase64 is ~200-400KB
+    // for a typical PDF, which is acceptable in the applications table.
+    const safeSnapshot = profileSnapshot ?? null
 
     const application = await prisma.application.create({
       data: {
