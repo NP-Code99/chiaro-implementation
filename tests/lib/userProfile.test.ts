@@ -17,6 +17,7 @@ const FULL_PROFILE: UserProfile = {
   location: 'San Francisco, CA',
   workAuth: 'US Citizen',
   yearsExp: '5-8',
+  desiredSalary: '160000',
   resumeBase64: 'data:application/pdf;base64,JVBERi0x',
   resumeFilename: 'ada-resume.pdf',
   bio: 'Passionate engineer with 6 years of experience.',
@@ -101,5 +102,71 @@ describe('profileCompletionPct', () => {
     const withResume = profileCompletionPct({ ...FULL_PROFILE })
     const withoutResume = profileCompletionPct({ ...FULL_PROFILE, resumeBase64: '' })
     expect(withResume).toBeGreaterThan(withoutResume)
+  })
+
+  it('does not count credential fields toward completion percentage', () => {
+    const withCredentials: UserProfile = {
+      ...FULL_PROFILE,
+      hasWellfoundAccount: true,
+      wellfoundEmail: 'ada@wellfound.com',
+      wellfoundPassword: 'secret-password',
+      useGoogleLogin: true,
+      googleEmail: 'ada@gmail.com',
+      googlePassword: 'google-secret',
+    }
+    // Credential fields should not push score above the non-credential 100%
+    expect(profileCompletionPct(withCredentials)).toBe(100)
+  })
+
+  it('returns 100 even without credential fields', () => {
+    const noCredentials: UserProfile = {
+      ...FULL_PROFILE,
+      hasWellfoundAccount: false,
+      wellfoundEmail: undefined,
+      wellfoundPassword: undefined,
+    }
+    expect(profileCompletionPct(noCredentials)).toBe(100)
+  })
+})
+
+describe('credential field serialization', () => {
+  it('saves and restores Wellfound credentials', () => {
+    const profile: UserProfile = {
+      ...FULL_PROFILE,
+      hasWellfoundAccount: true,
+      wellfoundEmail: 'ada@wellfound.com',
+      wellfoundPassword: 'wellfound-pass',
+    }
+    saveProfile(profile)
+    const loaded = loadProfile()
+    expect(loaded).not.toBeNull()
+    expect(loaded!.hasWellfoundAccount).toBe(true)
+    expect(loaded!.wellfoundEmail).toBe('ada@wellfound.com')
+    expect(loaded!.wellfoundPassword).toBe('wellfound-pass')
+  })
+
+  it('saves and restores Google credentials', () => {
+    const profile: UserProfile = {
+      ...FULL_PROFILE,
+      useGoogleLogin: true,
+      googleEmail: 'ada@gmail.com',
+      googlePassword: 'google-pass',
+    }
+    saveProfile(profile)
+    const loaded = loadProfile()
+    expect(loaded).not.toBeNull()
+    expect(loaded!.useGoogleLogin).toBe(true)
+    expect(loaded!.googleEmail).toBe('ada@gmail.com')
+    expect(loaded!.googlePassword).toBe('google-pass')
+  })
+
+  it('credential fields default to undefined when not set', () => {
+    saveProfile(FULL_PROFILE)
+    const loaded = loadProfile()
+    expect(loaded).not.toBeNull()
+    expect(loaded!.wellfoundPassword).toBeUndefined()
+    expect(loaded!.googlePassword).toBeUndefined()
+    expect(loaded!.hasWellfoundAccount).toBeUndefined()
+    expect(loaded!.useGoogleLogin).toBeUndefined()
   })
 })

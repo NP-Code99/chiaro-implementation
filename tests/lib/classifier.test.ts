@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { classifyAts, parseGreenhouseUrl, parseLeverUrl } from '@/lib/ats/classifier'
-import { AtsType } from '@prisma/client'
+import { AtsType } from '@/lib/prismaEnums'
 
 describe('classifyAts', () => {
   it('classifies boards.greenhouse.io URLs', () => {
