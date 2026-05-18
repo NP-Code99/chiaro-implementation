@@ -70,7 +70,6 @@ model Application {
   appliedAt       DateTime?
   profileSnapshot String?
   bypassMethod    String?
-  steelSessionId  String?
   loginPathway    String?  // new_user | existing_wellfound | google | unknown
   verificationCode    String?    // User-entered 2FA code (set via /api/applications/[id]/verify)
   verificationExpiry  DateTime?  // When the 2FA prompt expires (10 min window)

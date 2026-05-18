@@ -1,4 +1,4 @@
-import { AtsType } from '@prisma/client'
+import { AtsType } from '@/lib/prismaEnums'
 import { classifyATS } from '@/lib/atsClassifier'
 import type { WellfoundJob, FetchWellfoundParams } from '@/types/wellfound'
 
@@ -65,18 +65,31 @@ function normalizeJob(raw: WellfoundJob): NormalizedJob | null {
   }
 }
 
+/**
+ * Builds a Wellfound job search URL from params.
+ * The actor requires at least one startUrl pointing to a Wellfound listing page.
+ */
+function buildWellfoundSearchUrl(params: FetchWellfoundParams): string {
+  const base = 'https://wellfound.com/jobs'
+  const parts: string[] = []
+  if (params.searchQuery) parts.push(`query=${encodeURIComponent(params.searchQuery)}`)
+  if (params.location) parts.push(`location=${encodeURIComponent(params.location)}`)
+  if (params.remote) parts.push('remote=true')
+  return parts.length > 0 ? `${base}?${parts.join('&')}` : base
+}
+
 export async function fetchWellfoundJobs(params: FetchWellfoundParams = {}): Promise<NormalizedJob[]> {
   const apiKey = process.env.WELLFOUND_API_KEY
   if (!apiKey) throw new Error('WELLFOUND_API_KEY not configured')
 
+  const startUrl = buildWellfoundSearchUrl(params)
+
   const input: Record<string, unknown> = {
+    startUrls: [{ url: startUrl }],
     maxResults: params.maxResults ?? 50,
   }
-  if (params.searchQuery) input.searchQuery = params.searchQuery
-  if (params.location) input.location = params.location
-  if (params.remote !== undefined) input.remote = params.remote
 
-  const url = `${APIFY_BASE}/acts/${ACTOR_ID}/run-sync-get-dataset-items?token=${apiKey}&timeout=120`
+  const url = `${APIFY_BASE}/acts/${ACTOR_ID}/run-sync-get-dataset-items?token=${apiKey}&timeout=180`
 
   const res = await fetch(url, {
     method: 'POST',
