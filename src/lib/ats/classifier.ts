@@ -1,4 +1,4 @@
-import { AtsType } from '@prisma/client'
+import { AtsType } from '@/lib/prismaEnums'
 
 const PATTERNS: Array<{ pattern: RegExp; atsType: AtsType }> = [
   { pattern: /greenhouse\.io/i, atsType: AtsType.GREENHOUSE },
@@ -8,6 +8,8 @@ const PATTERNS: Array<{ pattern: RegExp; atsType: AtsType }> = [
   { pattern: /myworkday\.com/i, atsType: AtsType.WORKDAY },
   { pattern: /wd\d+\.myworkday\.com/i, atsType: AtsType.WORKDAY },
   { pattern: /workday\.com/i, atsType: AtsType.WORKDAY },
+  { pattern: /hire\.trakstar\.com/i, atsType: AtsType.TRAKSTAR },
+  { pattern: /bamboohr\.com/i, atsType: AtsType.BAMBOOHR },
 ]
 
 export function classifyAts(url: string): AtsType {
