@@ -1,7 +1,8 @@
-import Anthropic from '@anthropic-ai/sdk'
+import OpenAI from 'openai'
 import type { UserProfile } from './userProfile'
+import type { FieldDescriptor } from './browserApply'
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 /**
  * Generates a natural, specific answer to a single job application field
@@ -39,16 +40,259 @@ Write a concise, genuine, specific answer to this question as if you are the can
 Return ONLY the answer text, nothing else.`
 
   try {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     })
-    const text = message.content[0].type === 'text' ? message.content[0].text.trim() : ''
-    return text
+    return response.choices[0]?.message?.content?.trim() ?? ''
   } catch {
     return ''
   }
+}
+
+export interface FilledField {
+  selector: string
+  value: string
+  fieldType: 'text' | 'select' | 'radio' | 'checkbox' | 'file' | 'password' | 'textarea'
+  confidence: number
+}
+
+/**
+ * Uses Claude to map all extracted form fields to fill values in one shot.
+ * Returns only fields with confidence > 0.7.
+ */
+export async function claudeFormMapping(
+  fields: FieldDescriptor[],
+  profile: UserProfile,
+  job: { role: string; company: string; description: string; location: string },
+  resumeText: string,
+): Promise<FilledField[]> {
+  const profileSummary = JSON.stringify({
+    firstName: profile.firstName,
+    lastName: profile.lastName,
+    email: profile.email,
+    phone: profile.phone,
+    location: profile.location,
+    linkedin: profile.linkedin,
+    github: profile.github,
+    yearsExp: profile.yearsExp,
+    workAuth: profile.workAuth,
+    bio: profile.bio ?? '',
+  }, null, 2)
+
+  const fieldsSummary = fields.map(f => ({
+    selector: f.selector,
+    label: f.label,
+    type: f.inputType ?? f.tagName,
+    required: f.required,
+    options: f.options,
+  }))
+
+  const prompt = `You are auto-filling a job application form. Return a JSON array of fill instructions.
+
+FORM FIELDS:
+${JSON.stringify(fieldsSummary, null, 2)}
+
+APPLICANT PROFILE:
+${profileSummary}
+
+RESUME:
+${resumeText.slice(0, 2000) || '(not available)'}
+
+JOB:
+Role: ${job.role}
+Company: ${job.company}
+Location: ${job.location}
+Description: ${job.description.slice(0, 1500)}
+
+INSTRUCTIONS:
+- For open-ended questions (Why do you want to work here, Tell us about yourself, etc): write genuine 2-3 sentence answers using the job description and profile. Be specific, not generic.
+- For work authorization: authorized=Yes, sponsorship=No unless profile says otherwise
+- For "How did you find us" checkboxes: use value "Other"
+- For password fields: use value "Chiaro2024!"
+- For salary: give a realistic range for the role and location
+- For file upload (resume): use value "__RESUME__"
+- Skip fields you cannot fill with confidence
+
+Return ONLY a valid JSON array, no markdown, no explanation:
+[
+  { "selector": "CSS selector", "value": "fill value", "fieldType": "text|select|radio|checkbox|file|password|textarea", "confidence": 0.0-1.0 }
+]
+
+Only include fields with confidence above 0.7.`
+
+  try {
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }],
+    })
+
+    const text = response.choices[0]?.message?.content?.trim() ?? '[]'
+    const parsed = JSON.parse(text) as FilledField[]
+    return parsed.filter(f => f.confidence > 0.7)
+  } catch (err) {
+    console.warn('[claudeFormMapping] Failed:', err instanceof Error ? err.message : String(err))
+    return []
+  }
+}
+
+/**
+ * Rule-based form mapper — used when the Anthropic API key is unavailable or
+ * claudeFormMapping returns no results.  Matches field labels/names against the
+ * user profile using keyword patterns and fills every recognisable field with a
+ * real (or short placeholder) value.  Unknown required text fields get a brief
+ * "N/A — please see resume" stub so the form can still be submitted.
+ */
+export function fallbackFormMapping(
+  fields: FieldDescriptor[],
+  profile: UserProfile,
+): FilledField[] {
+  const results: FilledField[] = []
+
+  for (const f of fields) {
+    // Extract the name attribute value from CSS selectors like input[name="first_name"]
+    // or IDs like #first_name, and normalise underscores/hyphens to spaces so
+    // patterns like /first.*name/ match "first name" derived from "first_name".
+    const selectorNameRaw =
+      f.selector.match(/\[name="([^"]+)"\]/)?.[1] ??
+      f.selector.match(/^#([\w-]+)/)?.[1] ??
+      ''
+    const selectorName = selectorNameRaw.replace(/[_\-[\]]/g, ' ')
+
+    const hint = [f.label, selectorName, f.selector, f.tagName].join(' ').toLowerCase()
+    const inputType = (f.inputType ?? f.tagName).toLowerCase()
+
+    // Skip hidden / submit / button inputs
+    if (['hidden', 'submit', 'button', 'image', 'reset'].includes(inputType)) continue
+
+    // Skip CAPTCHA response fields — these are managed by the CAPTCHA solver (Steel/CapSolver)
+    // and must NOT be filled with fake text (corrupts the token, causes rejection)
+    if (/g-recaptcha-response|h-captcha-response|cf-turnstile-response/i.test(f.selector)) continue
+
+    // ── File upload (resume) ───────────────────────────────────────────────────
+    if (inputType === 'file') {
+      results.push({ selector: f.selector, value: '__RESUME__', fieldType: 'file', confidence: 0.9 })
+      continue
+    }
+
+    // ── Password ───────────────────────────────────────────────────────────────
+    if (inputType === 'password') {
+      results.push({ selector: f.selector, value: profile.applicationPassword, fieldType: 'password', confidence: 0.95 })
+      continue
+    }
+
+    // ── Checkbox ───────────────────────────────────────────────────────────────
+    if (inputType === 'checkbox') {
+      // Agree / terms / consent checkboxes → check them
+      if (/agree|terms|consent|confirm|certif|acknowledge|policy/i.test(hint)) {
+        results.push({ selector: f.selector, value: 'true', fieldType: 'checkbox', confidence: 0.85 })
+      }
+      // "How did you hear" → skip (not required usually)
+      continue
+    }
+
+    // ── Radio ──────────────────────────────────────────────────────────────────
+    if (inputType === 'radio') {
+      if (/sponsor|visa|h1b/i.test(hint)) {
+        results.push({ selector: f.selector, value: 'No', fieldType: 'radio', confidence: 0.9 })
+      } else if (/authoriz|eligible|work.*permit|legal.*work/i.test(hint)) {
+        results.push({ selector: f.selector, value: 'Yes', fieldType: 'radio', confidence: 0.9 })
+      } else if (/remote|hybrid|onsite|on.site|in.office/i.test(hint)) {
+        results.push({ selector: f.selector, value: 'Yes', fieldType: 'radio', confidence: 0.75 })
+      }
+      continue
+    }
+
+    // ── Select ─────────────────────────────────────────────────────────────────
+    if (inputType === 'select' || f.tagName === 'SELECT') {
+      let value = ''
+      const opts = (f.options ?? []).map(o => o.toLowerCase())
+
+      if (/sponsor|visa|h1b/i.test(hint)) {
+        value = pickOption(opts, ['no', 'not required', 'none', 'false']) ?? 'No'
+      } else if (/authoriz|eligible|work.*permit|legal.*work|citizen/i.test(hint)) {
+        value = pickOption(opts, ['yes', 'authorized', 'citizen', 'eligible']) ?? 'Yes'
+      } else if (/year.*exp|experience.*year|how.*long|seniority/i.test(hint)) {
+        value = pickOption(opts, [profile.yearsExp, '3', '4', '5', '3-5']) ?? profile.yearsExp
+      } else if (/country/i.test(hint)) {
+        value = pickOption(opts, ['united states', 'us', 'usa', 'america']) ?? 'United States'
+      } else if (/state|province/i.test(hint)) {
+        value = pickOption(opts, ['california', 'ca']) ?? 'CA'
+      } else if (/gender|pronoun/i.test(hint)) {
+        value = pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? ''
+      } else if (/race|ethnic/i.test(hint)) {
+        value = pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? ''
+      } else if (/veteran|military/i.test(hint)) {
+        value = pickOption(opts, ['not a veteran', 'no', 'decline', 'i am not']) ?? ''
+      } else if (/disabilit/i.test(hint)) {
+        value = pickOption(opts, ['no', 'not disabled', 'decline', 'do not']) ?? ''
+      } else if (/how.*hear|source|referral/i.test(hint)) {
+        value = pickOption(opts, ['other', 'internet', 'online', 'job board']) ?? ''
+      }
+      if (value) {
+        results.push({ selector: f.selector, value, fieldType: 'select', confidence: 0.8 })
+      }
+      continue
+    }
+
+    // ── Text / textarea ────────────────────────────────────────────────────────
+    const fieldType: FilledField['fieldType'] = (inputType === 'textarea' || f.tagName === 'TEXTAREA') ? 'textarea' : 'text'
+
+    let value = ''
+
+    if (/first.*name|fname|given.*name/i.test(hint))              value = profile.firstName
+    else if (/last.*name|lname|surname|family.*name/i.test(hint))  value = profile.lastName
+    else if (/full.*name|your.*name(?!.*company)(?!.*school)|applicant.*name/i.test(hint)) value = `${profile.firstName} ${profile.lastName}`
+    // Bare "name" field with no first/last/full qualifier — treat as full name
+    else if (/\bname\b/i.test(hint) && !/company|school|org|employer|refer|file/i.test(hint)) value = `${profile.firstName} ${profile.lastName}`
+    else if (/email/i.test(hint))                                  value = profile.email
+    else if (/phone|mobile|telephone|\btel\b|cell/i.test(hint))    value = profile.phone
+    else if (/linkedin/i.test(hint))                               value = profile.linkedin ?? ''
+    else if (/github/i.test(hint))                                 value = profile.github ?? ''
+    else if (/portfolio|personal.*site|website/i.test(hint))       value = 'https://alexrivera.dev'
+    else if (/\bcity\b/i.test(hint))                               value = 'San Francisco'
+    else if (/\bstate\b|\bprovince\b/i.test(hint))                 value = 'CA'
+    else if (/zip|postal/i.test(hint))                             value = '94105'
+    else if (/country/i.test(hint))                                value = 'United States'
+    else if (/location|address/i.test(hint))                       value = profile.location
+    else if (/salary|compensation|\bpay\b|desired.*pay|expected.*pay/i.test(hint)) value = profile.desiredSalary
+    else if (/year.*exp|experience.*year|how.*long.*experience/i.test(hint)) value = profile.yearsExp
+    else if (/current.*title|job.*title|position.*title/i.test(hint)) value = 'Software Engineer'
+    else if (/current.*company|employer|organization/i.test(hint)) value = 'TechCorp Inc.'
+    else if (/degree|education|major|school|university|college/i.test(hint)) value = 'B.S. Computer Science, UC Berkeley'
+    else if (/skill|technolog|language|stack/i.test(hint))         value = 'TypeScript, React, Node.js, PostgreSQL, AWS'
+    else if (/sponsor|visa|h1b/i.test(hint))                       value = 'No'
+    else if (/authoriz|eligible|work.*permit|legal.*work/i.test(hint)) value = 'Yes'
+    else if (/how.*hear|source|referral|where.*find/i.test(hint))  value = 'Other'
+    else if (/cover.*letter|motivation|why.*apply|why.*interest|tell.*us.*about|about.*yourself|introduce/i.test(hint)) {
+      value = profile.bio && profile.bio.length > 20
+        ? profile.bio
+        : `I'm a software engineer with ${profile.yearsExp} years of experience in full-stack development. I'm excited about this opportunity and confident my background in TypeScript, React, and Node.js would be a strong fit.`
+    }
+    else if (/availab|start.*date|when.*start/i.test(hint))        value = 'Immediately'
+    else if (/notice|notice.*period/i.test(hint))                  value = '2 weeks'
+    // Catch-all: fill every remaining text/textarea to avoid empty required fields
+    // or form validation errors that block submission.
+    else if (fieldType === 'textarea')   value = profile.bio && profile.bio.length > 20 ? profile.bio : 'Please see my attached resume for details.'
+    else                                 value = f.required ? 'N/A' : ''
+
+    if (value) {
+      results.push({ selector: f.selector, value, fieldType, confidence: 0.75 })
+    }
+  }
+
+  return results
+}
+
+/** Pick the first option text that contains any of the given keywords (case-insensitive). */
+function pickOption(options: string[], keywords: string[]): string | undefined {
+  for (const kw of keywords) {
+    const match = options.find(o => o.includes(kw))
+    if (match) return match
+  }
+  return undefined
 }
 
 /**
@@ -62,12 +306,12 @@ export async function generateSalaryAnswer(
   const prompt = `What is a reasonable salary expectation for a ${role} in ${location} with ${yearsExp} years of experience? Return ONLY the number or range, e.g. "$130,000" or "$120,000 - $150,000". Nothing else.`
 
   try {
-    const message = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
+    const response = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
       max_tokens: 30,
       messages: [{ role: 'user', content: prompt }],
     })
-    return message.content[0].type === 'text' ? message.content[0].text.trim() : ''
+    return response.choices[0]?.message?.content?.trim() ?? ''
   } catch {
     return ''
   }
