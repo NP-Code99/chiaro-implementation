@@ -1,5 +1,9 @@
 export type WorkAuth = 'US Citizen' | 'Green Card' | 'H1B Visa' | 'Need Sponsorship'
 export type YearsExp = '0-1' | '1-3' | '3-5' | '5-8' | '8-12' | '12+'
+export type VeteranStatus = 'I am not a protected veteran' | 'I identify as one or more of the classifications of a protected veteran' | "I don't wish to answer"
+export type DisabilityStatus = 'Yes, I have a disability' | 'No, I do not have a disability' | "I don't wish to answer"
+export type Gender = 'Male' | 'Female' | 'Non-binary' | 'Prefer not to say'
+export type Ethnicity = 'Asian' | 'Black or African American' | 'Hispanic or Latino' | 'Native American or Alaska Native' | 'Native Hawaiian or Pacific Islander' | 'Two or more races' | 'White' | 'Prefer not to say'
 
 export interface UserProfile {
   firstName: string
@@ -11,10 +15,31 @@ export interface UserProfile {
   location: string
   workAuth: WorkAuth
   yearsExp: YearsExp
+  desiredSalary: string        // e.g. "130000" or "$120,000 - $150,000"
   resumeBase64: string
   resumeFilename: string
   bio: string
+  // EEO / demographic fields — used for Greenhouse, Lever, and other ATS EEO sections
+  veteranStatus?: VeteranStatus
+  disabilityStatus?: DisabilityStatus
+  gender?: Gender
+  ethnicity?: Ethnicity
   applicationPassword: string  // Used for ATS account creation fields — not a security credential
+  wellfoundCookies?: string    // Paste from browser devtools — bypasses DataDome/Cloudflare
+  startupJobsCookies?: string  // Paste from browser devtools — bypasses Cloudflare on startup.jobs
+
+  // Wellfound account credentials (optional — used for existing account login)
+  wellfoundEmail?: string
+  wellfoundPassword?: string
+  hasWellfoundAccount?: boolean
+
+  // Google credentials (optional — used when Wellfound account is linked to Google)
+  googleEmail?: string
+  googlePassword?: string
+  useGoogleLogin?: boolean
+
+  // Answers provided by user for NEEDS_INFO applications (passed back on resume)
+  pendingAnswers?: Record<string, string>
 }
 
 export function generateApplicationPassword(): string {
@@ -24,13 +49,13 @@ export function generateApplicationPassword(): string {
 
 const STORAGE_KEY = 'chiaro_user_profile'
 
-// Ordered list of fields used for completion scoring
+// Required fields for completion scoring — credential fields are intentionally excluded
+// so users are not forced to provide login credentials to reach 100%
 const COMPLETION_FIELDS: (keyof UserProfile)[] = [
   'firstName',
   'lastName',
   'email',
   'phone',
-  'linkedin',
   'location',
   'workAuth',
   'yearsExp',

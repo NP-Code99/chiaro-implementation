@@ -2,19 +2,30 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { saveProfile, loadProfile, profileCompletionPct, type UserProfile, type WorkAuth, type YearsExp } from '@/lib/userProfile'
+import { saveProfile, loadProfile, profileCompletionPct, generateApplicationPassword, type UserProfile, type WorkAuth, type YearsExp, type VeteranStatus, type DisabilityStatus, type Gender, type Ethnicity } from '@/lib/userProfile'
 import toast from 'react-hot-toast'
 
 const WORK_AUTH_OPTIONS: WorkAuth[] = ['US Citizen', 'Green Card', 'H1B Visa', 'Need Sponsorship']
 const YEARS_EXP_OPTIONS: YearsExp[] = ['0-1', '1-3', '3-5', '5-8', '8-12', '12+']
+const VETERAN_OPTIONS: VeteranStatus[] = ['I am not a protected veteran', 'I identify as one or more of the classifications of a protected veteran', "I don't wish to answer"]
+const DISABILITY_OPTIONS: DisabilityStatus[] = ['Yes, I have a disability', 'No, I do not have a disability', "I don't wish to answer"]
+const GENDER_OPTIONS: Gender[] = ['Male', 'Female', 'Non-binary', 'Prefer not to say']
+const ETHNICITY_OPTIONS: Ethnicity[] = ['Asian', 'Black or African American', 'Hispanic or Latino', 'Native American or Alaska Native', 'Native Hawaiian or Pacific Islander', 'Two or more races', 'White', 'Prefer not to say']
 
 const EMPTY: UserProfile = {
   firstName: '', lastName: '', email: '', phone: '',
   linkedin: '', github: '', location: '',
   workAuth: 'US Citizen', yearsExp: '1-3',
+  desiredSalary: '',
   resumeBase64: '', resumeFilename: '',
   bio: '',
   applicationPassword: '',
+  hasWellfoundAccount: false,
+  wellfoundEmail: '',
+  wellfoundPassword: '',
+  useGoogleLogin: false,
+  googleEmail: '',
+  googlePassword: '',
 }
 
 export function ProfileForm() {
@@ -22,6 +33,9 @@ export function ProfileForm() {
   const fileRef = useRef<HTMLInputElement>(null)
   const [form, setForm] = useState<UserProfile>(EMPTY)
   const [saving, setSaving] = useState(false)
+  const [showWellfoundPassword, setShowWellfoundPassword] = useState(false)
+  const [showGooglePassword, setShowGooglePassword] = useState(false)
+  const [showAppPassword, setShowAppPassword] = useState(false)
 
   useEffect(() => {
     const existing = loadProfile()
@@ -52,8 +66,19 @@ export function ProfileForm() {
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.firstName || !form.email) { toast.error('Name and email are required'); return }
+    if (form.applicationPassword && form.applicationPassword.length < 12) {
+      toast.error('Application password must be at least 12 characters')
+      return
+    }
     setSaving(true)
-    saveProfile(form)
+    const profileToSave: UserProfile = {
+      ...form,
+      applicationPassword: form.applicationPassword || generateApplicationPassword(),
+    }
+    // Never log credential values — only log presence
+    console.log('[profile] saving — wellfoundPassword:', profileToSave.wellfoundPassword ? '[present]' : '[missing]')
+    console.log('[profile] saving — googlePassword:', profileToSave.googlePassword ? '[present]' : '[missing]')
+    saveProfile(profileToSave)
     setSaving(false)
     toast.success('Profile saved!')
     router.push('/')
@@ -125,24 +150,40 @@ export function ProfileForm() {
         </div>
       </div>
 
-      {/* Location + Work Auth + Years Exp */}
-      <div className="grid grid-cols-3 gap-4">
+      {/* Location + Work Auth */}
+      <div className="grid grid-cols-2 gap-4">
         <div>
           <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Location</label>
           <input value={form.location} onChange={field('location')}
             placeholder="San Francisco, CA" className={inputCls} />
         </div>
         <div>
-          <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Work Auth</label>
+          <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Work Authorization</label>
           <select value={form.workAuth} onChange={field('workAuth')} className={inputCls}>
             {WORK_AUTH_OPTIONS.map(o => <option key={o}>{o}</option>)}
           </select>
         </div>
+      </div>
+
+      {/* Years Exp + Desired Salary */}
+      <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Years Exp</label>
+          <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Years of Experience</label>
           <select value={form.yearsExp} onChange={field('yearsExp')} className={inputCls}>
             {YEARS_EXP_OPTIONS.map(o => <option key={o}>{o}</option>)}
           </select>
+        </div>
+        <div>
+          <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Desired Salary (USD)</label>
+          <input
+            value={form.desiredSalary}
+            onChange={field('desiredSalary')}
+            placeholder="130000"
+            className={inputCls}
+          />
+          <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+            Annual base in USD, e.g. 130000
+          </p>
         </div>
       </div>
 
@@ -190,6 +231,358 @@ export function ProfileForm() {
           placeholder="I'm a software engineer with 6 years of experience building…"
           className={inputCls}
           style={{ resize: 'vertical' }}
+        />
+      </div>
+
+      {/* EEO / Demographic fields */}
+      <div className="rounded-xl p-4 space-y-4" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)' }}>
+        <div>
+          <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>EEO / Voluntary Self-Identification</span>
+          <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
+            Used for Greenhouse, Lever, and other ATS demographic sections. All fields are optional.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Gender</label>
+            <select value={form.gender ?? ''} onChange={field('gender')} className={inputCls}>
+              <option value="">Prefer not to say</option>
+              {GENDER_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Ethnicity / Race</label>
+            <select value={form.ethnicity ?? ''} onChange={field('ethnicity')} className={inputCls}>
+              <option value="">Prefer not to say</option>
+              {ETHNICITY_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Veteran Status</label>
+            <select value={form.veteranStatus ?? ''} onChange={field('veteranStatus')} className={inputCls}>
+              <option value="">I don&apos;t wish to answer</option>
+              {VETERAN_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Disability Status</label>
+            <select value={form.disabilityStatus ?? ''} onChange={field('disabilityStatus')} className={inputCls}>
+              <option value="">I don&apos;t wish to answer</option>
+              {DISABILITY_OPTIONS.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Account Credentials */}
+      <div className="rounded-xl p-4 space-y-5" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)' }}>
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Account credentials</span>
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"
+              style={{ background: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+              Optional
+            </span>
+          </div>
+          <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+            Some job sites remember your email and require you to log in. Chiaro can log in automatically
+            on your behalf if you provide your credentials. Without them, jobs requiring login will be
+            flagged for manual review instead.
+          </p>
+        </div>
+
+        {/* Wellfound account toggle */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <label className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>
+                Do you have a Wellfound account?
+              </label>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
+                We will use these to log in when your account is detected
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setForm(prev => ({ ...prev, hasWellfoundAccount: !prev.hasWellfoundAccount }))}
+              className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0"
+              style={{
+                background: form.hasWellfoundAccount ? 'var(--color-accent)' : 'var(--color-border)',
+              }}
+            >
+              <span
+                className="inline-block h-4 w-4 rounded-full bg-white shadow transition-transform"
+                style={{ transform: form.hasWellfoundAccount ? 'translateX(22px)' : 'translateX(2px)' }}
+              />
+            </button>
+          </div>
+
+          {form.hasWellfoundAccount && (
+            <div className="space-y-3 pl-0">
+              <div>
+                <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Wellfound email</label>
+                <input
+                  type="email"
+                  value={form.wellfoundEmail ?? ''}
+                  onChange={field('wellfoundEmail')}
+                  placeholder="you@example.com"
+                  className={inputCls}
+                  autoComplete="off"
+                />
+              </div>
+              <div>
+                <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Wellfound password</label>
+                <div className="relative">
+                  <input
+                    type={showWellfoundPassword ? 'text' : 'password'}
+                    value={form.wellfoundPassword ?? ''}
+                    onChange={field('wellfoundPassword')}
+                    placeholder="Your Wellfound password"
+                    className={inputCls}
+                    style={{ paddingRight: '2.5rem' }}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowWellfoundPassword(v => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-xs px-1"
+                    style={{ color: 'var(--color-text-muted)' }}
+                  >
+                    {showWellfoundPassword ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Google login toggle */}
+        <div className="space-y-3" style={{ borderTop: '1px solid var(--color-border)', paddingTop: '1rem' }}>
+          <div className="flex items-center justify-between">
+            <div>
+              <label className="text-sm font-medium" style={{ color: 'var(--color-text)' }}>
+                Use Google to sign in?
+              </label>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
+                For Wellfound accounts linked to Google
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setForm(prev => ({ ...prev, useGoogleLogin: !prev.useGoogleLogin }))}
+              className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors flex-shrink-0"
+              style={{
+                background: form.useGoogleLogin ? 'var(--color-accent)' : 'var(--color-border)',
+              }}
+            >
+              <span
+                className="inline-block h-4 w-4 rounded-full bg-white shadow transition-transform"
+                style={{ transform: form.useGoogleLogin ? 'translateX(22px)' : 'translateX(2px)' }}
+              />
+            </button>
+          </div>
+
+          {form.useGoogleLogin && (
+            <div className="space-y-3">
+              {/* 2FA warning */}
+              <div className="rounded-lg px-3 py-2.5 text-xs" style={{ background: 'oklch(75% 0.15 80 / 0.15)', border: '1px solid oklch(75% 0.15 80 / 0.4)', color: 'oklch(50% 0.12 60)' }}>
+                <strong>Important:</strong> Google login may require 2FA. If your Google account has
+                two-factor authentication enabled, Google login automation may not work.
+                Consider using a Wellfound password instead.
+              </div>
+              <div>
+                <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Google email</label>
+                <input
+                  type="email"
+                  value={form.googleEmail ?? ''}
+                  onChange={field('googleEmail')}
+                  placeholder="you@gmail.com"
+                  className={inputCls}
+                  autoComplete="off"
+                />
+              </div>
+              <div>
+                <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Google password</label>
+                <div className="relative">
+                  <input
+                    type={showGooglePassword ? 'text' : 'password'}
+                    value={form.googlePassword ?? ''}
+                    onChange={field('googlePassword')}
+                    placeholder="Your Google password"
+                    className={inputCls}
+                    style={{ paddingRight: '2.5rem' }}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowGooglePassword(v => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-xs px-1"
+                    style={{ color: 'var(--color-text-muted)' }}
+                  >
+                    {showGooglePassword ? 'Hide' : 'Show'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Application password — always shown */}
+        <div style={{ borderTop: '1px solid var(--color-border)', paddingTop: '1rem' }}>
+          <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Password for new accounts</label>
+          <div className="relative">
+            <input
+              type={showAppPassword ? 'text' : 'password'}
+              value={form.applicationPassword ?? 'Chiaro2024!!'}
+              onChange={field('applicationPassword')}
+              placeholder="Chiaro2024!!"
+              className={inputCls}
+              style={{ paddingRight: '2.5rem' }}
+              autoComplete="new-password"
+            />
+            <button
+              type="button"
+              onClick={() => setShowAppPassword(v => !v)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-xs px-1"
+              style={{ color: 'var(--color-text-muted)' }}
+            >
+              {showAppPassword ? 'Hide' : 'Show'}
+            </button>
+          </div>
+          <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+            Used when creating new accounts on job sites that require registration.
+            Same password is used everywhere. Must be at least 12 characters.
+          </p>
+        </div>
+
+        {/* Footer note */}
+        <p className="text-xs pt-1" style={{ color: 'var(--color-text-muted)', borderTop: '1px solid var(--color-border)', paddingTop: '0.75rem' }}>
+          Your credentials are stored locally and only used to submit job applications on your behalf.
+        </p>
+      </div>
+
+      {/* Wellfound Session Cookies — bypasses DataDome + Cloudflare */}
+      <div className="rounded-xl p-4 space-y-3" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)' }}>
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Wellfound Session</span>
+              {form.wellfoundCookies?.trim() ? (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"
+                  style={{ background: 'oklch(65% 0.18 145 / 0.15)', color: 'oklch(55% 0.18 145)' }}>
+                  Active
+                </span>
+              ) : (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"
+                  style={{ background: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+                  Not set
+                </span>
+              )}
+            </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+              Paste your Wellfound browser cookies to bypass Cloudflare and DataDome bot detection
+            </p>
+          </div>
+          {form.wellfoundCookies?.trim() && (
+            <button
+              type="button"
+              onClick={() => setForm(prev => ({ ...prev, wellfoundCookies: '' }))}
+              className="text-xs px-2 py-1 rounded"
+              style={{ color: 'var(--color-text-muted)', background: 'var(--color-border)' }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        <details className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+          <summary className="cursor-pointer font-semibold select-none" style={{ color: 'var(--color-text-secondary)' }}>
+            How to get your cookies (30 seconds)
+          </summary>
+          <ol className="mt-2 ml-4 space-y-1 list-decimal leading-relaxed">
+            <li>Open Chrome and go to <strong>wellfound.com</strong></li>
+            <li>Log in to your Wellfound account</li>
+            <li>Press <kbd className="px-1 rounded" style={{ background: 'var(--color-border)' }}>F12</kbd> to open DevTools</li>
+            <li>Click the <strong>Console</strong> tab</li>
+            <li>Type <code className="px-1 rounded" style={{ background: 'var(--color-border)' }}>document.cookie</code> and press Enter</li>
+            <li>Select all the output text, copy it, and paste below</li>
+          </ol>
+          <p className="mt-2 font-medium" style={{ color: 'oklch(62% 0.18 30)' }}>
+            Cookies expire after ~24h — re-paste after Wellfound logs you out.
+          </p>
+        </details>
+
+        <textarea
+          value={form.wellfoundCookies ?? ''}
+          onChange={field('wellfoundCookies')}
+          rows={3}
+          placeholder="datadome=Abc123...; cf_clearance=xyz...; _wellfound_session=..."
+          className={inputCls}
+          style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: '11px' }}
+          spellCheck={false}
+        />
+      </div>
+
+      {/* startup.jobs Session Cookies — bypasses Cloudflare */}
+      <div className="rounded-xl p-4 space-y-3" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)' }}>
+        <div className="flex items-start justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>startup.jobs Session</span>
+              {form.startupJobsCookies?.trim() ? (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"
+                  style={{ background: 'oklch(65% 0.18 145 / 0.15)', color: 'oklch(55% 0.18 145)' }}>
+                  Active
+                </span>
+              ) : (
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide"
+                  style={{ background: 'var(--color-border)', color: 'var(--color-text-muted)' }}>
+                  Not set
+                </span>
+              )}
+            </div>
+            <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+              Paste your startup.jobs browser cookies to bypass Cloudflare bot detection
+            </p>
+          </div>
+          {form.startupJobsCookies?.trim() && (
+            <button
+              type="button"
+              onClick={() => setForm(prev => ({ ...prev, startupJobsCookies: '' }))}
+              className="text-xs px-2 py-1 rounded"
+              style={{ color: 'var(--color-text-muted)', background: 'var(--color-border)' }}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        <details className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+          <summary className="cursor-pointer font-semibold select-none" style={{ color: 'var(--color-text-secondary)' }}>
+            How to get your cookies (30 seconds)
+          </summary>
+          <ol className="mt-2 ml-4 space-y-1 list-decimal leading-relaxed">
+            <li>Open Chrome and go to <strong>startup.jobs</strong></li>
+            <li>Press <kbd className="px-1 rounded" style={{ background: 'var(--color-border)' }}>F12</kbd> to open DevTools</li>
+            <li>Click the <strong>Console</strong> tab</li>
+            <li>Type <code className="px-1 rounded" style={{ background: 'var(--color-border)' }}>document.cookie</code> and press Enter</li>
+            <li>Select all the output, copy it, and paste below</li>
+          </ol>
+          <p className="mt-2 font-medium" style={{ color: 'oklch(62% 0.18 30)' }}>
+            Cookies expire after a few hours — re-paste if startup.jobs starts blocking again.
+          </p>
+        </details>
+
+        <textarea
+          value={form.startupJobsCookies ?? ''}
+          onChange={field('startupJobsCookies')}
+          rows={3}
+          placeholder="cf_clearance=Abc123...; __cf_bm=xyz..."
+          className={inputCls}
+          style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: '11px' }}
+          spellCheck={false}
         />
       </div>
 
