@@ -100,8 +100,9 @@ export function SwipeCard({ job, isTop, stackIndex, onSwipeLeft, onSwipeRight }:
   const salary = formatSalary(job.salaryMin, job.salaryMax)
   const color = logoColor(job.company)
   const initials = job.company.slice(0, 2).toUpperCase()
-  const isRemote = job.tags.some(t => /remote/i.test(t))
-  const stage = job.tags.find(t => /series|seed|pre-seed|yc|backed|public|pre-ipo/i.test(t)) ?? null
+  const parsedTags: string[] = typeof job.tags === 'string' ? JSON.parse(job.tags) : job.tags
+  const isRemote = parsedTags.some(t => /remote/i.test(t))
+  const stage = parsedTags.find(t => /series|seed|pre-seed|yc|backed|public|pre-ipo/i.test(t)) ?? null
 
   async function handleDragEnd(_: unknown, info: PanInfo) {
     const { offset, velocity } = info
@@ -199,7 +200,7 @@ export function SwipeCard({ job, isTop, stackIndex, onSwipeLeft, onSwipeRight }:
 
         {/* Skill tags */}
         <div className="px-5 pb-3 flex flex-wrap gap-1.5">
-          {job.tags
+          {parsedTags
             .filter(t => !/remote|series|seed|yc|backed|public|pre-ipo/i.test(t))
             .slice(0, 4)
             .map((tag) => (

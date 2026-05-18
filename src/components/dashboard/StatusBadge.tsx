@@ -1,4 +1,4 @@
-import { ApplicationStatus } from '@prisma/client'
+import { ApplicationStatus } from '@/lib/prismaEnums'
 
 const STATUS_CONFIG: Record<
   ApplicationStatus,
@@ -34,6 +34,12 @@ const STATUS_CONFIG: Record<
     label: 'Needs Input',
     bg: 'oklch(65% 0.2 290 / 0.15)',
     color: 'oklch(65% 0.2 290)',
+  },
+  VERIFICATION_PENDING: {
+    label: 'Verify',
+    bg: 'oklch(75% 0.18 55 / 0.15)',
+    color: 'oklch(75% 0.18 55)',
+    dot: true,
   },
 }
 

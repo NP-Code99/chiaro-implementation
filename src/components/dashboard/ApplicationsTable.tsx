@@ -1,9 +1,10 @@
 'use client'
 
 import { useApplications } from '@/hooks/useApplications'
+import type { ApplicationWithJob } from '@/hooks/useApplications'
 import { ApplicationRow } from './ApplicationRow'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { ApplicationStatus } from '@prisma/client'
+import { ApplicationStatus } from '@/lib/prismaEnums'
 import Link from 'next/link'
 
 const STAT_LABELS: Partial<Record<ApplicationStatus, string>> = {
@@ -14,14 +15,25 @@ const STAT_LABELS: Partial<Record<ApplicationStatus, string>> = {
   NEEDS_REVIEW: 'Review',
 }
 
+const isSkippedApp = (a: ApplicationWithJob) =>
+  a.status === ApplicationStatus.NEEDS_REVIEW &&
+  (a as ApplicationWithJob & { errorCode?: string | null }).errorCode?.startsWith('B') === true
+
 export function ApplicationsTable() {
   const { applications, isLoading, mutate } = useApplications()
 
-  const stats = Object.entries(STAT_LABELS).map(([status, label]) => ({
-    label,
-    count: applications.filter((a) => a.status === status).length,
-    status: status as ApplicationStatus,
-  }))
+  const skippedCount = applications.filter(isSkippedApp).length
+
+  const stats = [
+    ...Object.entries(STAT_LABELS).map(([status, label]) => ({
+      label,
+      count: status === ApplicationStatus.NEEDS_REVIEW
+        ? applications.filter((a) => a.status === status && !isSkippedApp(a)).length
+        : applications.filter((a) => a.status === status).length,
+      status: status as ApplicationStatus,
+    })),
+    { label: 'Skipped', count: skippedCount, status: 'SKIPPED' as ApplicationStatus },
+  ]
 
   if (isLoading) {
     return (

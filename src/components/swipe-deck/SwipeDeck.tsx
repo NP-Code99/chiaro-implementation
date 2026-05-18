@@ -8,6 +8,7 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import toast from 'react-hot-toast'
 import Link from 'next/link'
 import type { Job } from '@prisma/client'
+import { loadProfile } from '@/lib/userProfile'
 
 interface SwipeDeckProps {
   jobs: Job[]
@@ -33,10 +34,19 @@ export function SwipeDeck({ jobs, userId }: SwipeDeckProps) {
     setApplying(true)
 
     try {
+      const profile = loadProfile()
+      const profileSnapshot = profile ? JSON.stringify(profile) : null
+
+      if (!profileSnapshot) {
+        toast.error('Complete your profile before applying', { duration: 4000 })
+        setApplying(false)
+        return
+      }
+
       const res = await fetch('/api/applications', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: job.id, userId }),
+        body: JSON.stringify({ jobId: job.id, userId, profileSnapshot }),
       })
       if (!res.ok) {
         const data = await res.json()

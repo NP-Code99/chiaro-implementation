@@ -131,7 +131,7 @@ export function JobCard({ job, isTop, stackIndex, onSwipeLeft, onSwipeRight }: J
 
         {/* Tags */}
         <div className="px-6 pb-6 flex flex-wrap gap-2">
-          {job.tags.slice(0, 5).map((tag) => (
+          {(JSON.parse(job.tags) as string[]).slice(0, 5).map((tag) => (
             <span key={tag} className="tag">
               {tag}
             </span>

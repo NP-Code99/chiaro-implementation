@@ -1,16 +1,17 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { EmptyState } from '@/components/ui/EmptyState'
 import Link from 'next/link'
 import toast from 'react-hot-toast'
 import type { Application, Job, PausedApplication } from '@prisma/client'
-import { ApplicationStatus } from '@prisma/client'
+import { ApplicationStatus } from '@/lib/prismaEnums'
 import { loadProfile } from '@/lib/userProfile'
 
 type AppWithJob = Application & {
   job: Job
   pausedApplication: PausedApplication | null
+  verificationExpiry?: Date | string | null
 }
 
 type PendingQuestion = { fieldLabel: string; fieldType: string; selector: string }
@@ -18,12 +19,13 @@ type PendingQuestion = { fieldLabel: string; fieldType: string; selector: string
 // ── Status config ─────────────────────────────────────────────────────────────
 
 const STATUS_CFG: Record<ApplicationStatus, { label: string; dotColor: string; bg: string; color: string }> = {
-  PENDING:      { label: 'Queued',          dotColor: 'oklch(55% 0.015 240)',  bg: 'oklch(45% 0.01 240 / 0.2)',   color: 'oklch(65% 0.015 240)'  },
-  APPLYING:     { label: 'Applying',        dotColor: 'oklch(65% 0.22 250)',   bg: 'oklch(55% 0.22 250 / 0.15)',  color: 'oklch(65% 0.22 250)'   },
-  APPLIED:      { label: 'Applied',         dotColor: 'oklch(68% 0.18 145)',   bg: 'oklch(68% 0.18 145 / 0.15)', color: 'oklch(68% 0.18 145)'   },
-  FAILED:       { label: 'Failed',          dotColor: 'oklch(62% 0.22 25)',    bg: 'oklch(62% 0.22 25 / 0.15)',  color: 'oklch(62% 0.22 25)'    },
-  NEEDS_REVIEW: { label: 'Needs Review',    dotColor: 'oklch(72% 0.18 75)',    bg: 'oklch(72% 0.18 75 / 0.15)',  color: 'oklch(72% 0.18 75)'    },
-  NEEDS_INFO:   { label: 'Needs Your Input',dotColor: 'oklch(65% 0.2 290)',    bg: 'oklch(65% 0.2 290 / 0.15)',  color: 'oklch(65% 0.2 290)'    },
+  PENDING:               { label: 'Queued',          dotColor: 'oklch(55% 0.015 240)',  bg: 'oklch(45% 0.01 240 / 0.2)',   color: 'oklch(65% 0.015 240)'  },
+  APPLYING:              { label: 'Applying',        dotColor: 'oklch(65% 0.22 250)',   bg: 'oklch(55% 0.22 250 / 0.15)',  color: 'oklch(65% 0.22 250)'   },
+  APPLIED:               { label: 'Applied',         dotColor: 'oklch(68% 0.18 145)',   bg: 'oklch(68% 0.18 145 / 0.15)', color: 'oklch(68% 0.18 145)'   },
+  FAILED:                { label: 'Failed',          dotColor: 'oklch(62% 0.22 25)',    bg: 'oklch(62% 0.22 25 / 0.15)',  color: 'oklch(62% 0.22 25)'    },
+  NEEDS_REVIEW:          { label: 'Needs Review',    dotColor: 'oklch(72% 0.18 75)',    bg: 'oklch(72% 0.18 75 / 0.15)',  color: 'oklch(72% 0.18 75)'    },
+  NEEDS_INFO:            { label: 'Needs Your Input',dotColor: 'oklch(65% 0.2 290)',    bg: 'oklch(65% 0.2 290 / 0.15)',  color: 'oklch(65% 0.2 290)'    },
+  VERIFICATION_PENDING:  { label: 'Verify 2FA',      dotColor: 'oklch(75% 0.18 55)',    bg: 'oklch(75% 0.18 55 / 0.12)',  color: 'oklch(70% 0.18 55)'    },
 }
 
 function timeAgo(date: Date | string): string {
@@ -181,13 +183,169 @@ function NeedsInfoCard({ app, onRefresh }: { app: AppWithJob; onRefresh: () => v
   )
 }
 
+// ── Verification Card ─────────────────────────────────────────────────────────
+
+function VerificationCard({ app, onRefresh }: { app: AppWithJob; onRefresh: () => void }) {
+  const [code, setCode] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [skipping, setSkipping] = useState(false)
+
+  // Countdown timer
+  const expiryMs = app.verificationExpiry ? new Date(app.verificationExpiry as unknown as string).getTime() : Date.now() + 600_000
+  const [secondsLeft, setSecondsLeft] = useState(Math.max(0, Math.floor((expiryMs - Date.now()) / 1000)))
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    timerRef.current = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((expiryMs - Date.now()) / 1000))
+      setSecondsLeft(remaining)
+      if (remaining === 0 && timerRef.current) clearInterval(timerRef.current)
+    }, 1000)
+    return () => { if (timerRef.current) clearInterval(timerRef.current) }
+  }, [expiryMs])
+
+  const minutes = Math.floor(secondsLeft / 60)
+  const seconds = secondsLeft % 60
+  const timerExpired = secondsLeft === 0
+
+  const verificationTypeLabel = (() => {
+    const msg = app.errorMessage ?? ''
+    if (msg.includes('email_code'))  return 'Check your email for a verification code'
+    if (msg.includes('sms_code'))    return 'Check your phone for an SMS code'
+    if (msg.includes('authenticator')) return 'Open your authenticator app for a 6-digit code'
+    if (msg.includes('phone_prompt')) return 'Tap Yes on your phone to approve the sign-in'
+    return 'Enter your verification code below'
+  })()
+
+  async function handleSubmit() {
+    if (!code.trim()) {
+      toast.error('Please enter the verification code')
+      return
+    }
+    setSubmitting(true)
+    try {
+      const res = await fetch(`/api/applications/${app.id}/verify`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ verificationCode: code.trim() }),
+      })
+      if (!res.ok) {
+        const err = await res.json() as { error?: string }
+        throw new Error(err.error ?? 'Verification failed')
+      }
+      toast.success('Code submitted — applying...')
+      onRefresh()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not submit code')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  async function handleSkip() {
+    setSkipping(true)
+    try {
+      const res = await fetch(`/api/applications/${app.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'skip_verification' }),
+      })
+      if (!res.ok) throw new Error('Skip failed')
+      toast('Marked for manual application')
+      onRefresh()
+    } catch {
+      toast.error('Could not skip')
+    } finally {
+      setSkipping(false)
+    }
+  }
+
+  return (
+    <div className="rounded-2xl p-5 space-y-4"
+      style={{ background: 'oklch(75% 0.18 55 / 0.07)', border: '1px solid oklch(75% 0.18 55 / 0.35)' }}>
+
+      {/* Header */}
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>
+            {app.job.role}
+          </p>
+          <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>{app.job.company}</p>
+        </div>
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold flex-shrink-0"
+          style={{ background: STATUS_CFG.VERIFICATION_PENDING.bg, color: STATUS_CFG.VERIFICATION_PENDING.color }}>
+          <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: STATUS_CFG.VERIFICATION_PENDING.dotColor }} />
+          Verify 2FA
+        </span>
+      </div>
+
+      {/* Instruction */}
+      <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+        {verificationTypeLabel}
+      </p>
+
+      {/* Countdown */}
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium tabular-nums"
+          style={{ color: timerExpired ? 'var(--color-error)' : 'oklch(70% 0.18 55)' }}>
+          {timerExpired
+            ? 'Verification window expired'
+            : `${minutes}:${String(seconds).padStart(2, '0')} remaining`}
+        </span>
+      </div>
+
+      {/* Code input */}
+      {!timerExpired && (
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={code}
+            onChange={e => setCode(e.target.value.replace(/\D/g, '').slice(0, 8))}
+            placeholder="123456"
+            maxLength={8}
+            className="flex-1 rounded-lg px-3 py-2 text-center text-lg font-mono tracking-widest"
+            style={{
+              background: 'var(--color-surface)',
+              border: '1px solid var(--color-border)',
+              color: 'var(--color-text)',
+              outline: 'none',
+              letterSpacing: '0.3em',
+            }}
+            onKeyDown={e => { if (e.key === 'Enter') void handleSubmit() }}
+          />
+          <button
+            onClick={() => void handleSubmit()}
+            disabled={submitting || !code.trim()}
+            className="px-4 py-2 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 flex-shrink-0"
+            style={{ background: 'oklch(70% 0.18 55)', color: 'white' }}
+          >
+            {submitting ? 'Submitting…' : 'Submit'}
+          </button>
+        </div>
+      )}
+
+      {/* Skip button */}
+      <button
+        onClick={() => void handleSkip()}
+        disabled={skipping}
+        className="text-xs transition-all disabled:opacity-50"
+        style={{ color: 'var(--color-text-muted)' }}
+      >
+        {skipping ? 'Skipping…' : 'Skip — apply manually instead'}
+      </button>
+    </div>
+  )
+}
+
 // ── Row ───────────────────────────────────────────────────────────────────────
 
 function AppRow({ app, onRetry }: { app: AppWithJob; onRetry: () => void }) {
   const [expanded, setExpanded] = useState(false)
   const [retrying, setRetrying] = useState(false)
-  const cfg = STATUS_CFG[app.status]
-  const isRetryable = app.status === ApplicationStatus.FAILED || app.status === ApplicationStatus.NEEDS_REVIEW
+  const errorCode = (app as AppWithJob & { errorCode?: string | null }).errorCode
+  const isSkipped = app.status === ApplicationStatus.NEEDS_REVIEW && errorCode?.startsWith('B') === true
+  const cfg = STATUS_CFG[app.status as ApplicationStatus]
+  const isRetryable = !isSkipped && (app.status === ApplicationStatus.FAILED || app.status === ApplicationStatus.NEEDS_REVIEW)
 
   async function retry() {
     setRetrying(true)
@@ -227,12 +385,20 @@ function AppRow({ app, onRetry }: { app: AppWithJob; onRetry: () => void }) {
           </div>
         </td>
         <td className="py-3.5 pr-4">
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
-            style={{ background: cfg.bg, color: cfg.color }}>
-            <span className={`w-1.5 h-1.5 rounded-full ${app.status === 'APPLYING' ? 'animate-pulse-slow' : ''}`}
-              style={{ background: cfg.dotColor }} />
-            {cfg.label}
-          </span>
+          {isSkipped ? (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
+              style={{ background: 'oklch(45% 0.01 240 / 0.15)', color: 'oklch(55% 0.01 240)' }}>
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'oklch(55% 0.01 240)' }} />
+              Skipped
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold"
+              style={{ background: cfg.bg, color: cfg.color }}>
+              <span className={`w-1.5 h-1.5 rounded-full ${app.status === 'APPLYING' ? 'animate-pulse-slow' : ''}`}
+                style={{ background: cfg.dotColor }} />
+              {cfg.label}
+            </span>
+          )}
         </td>
         <td className="py-3.5 pr-4 hidden sm:table-cell">
           <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
@@ -307,16 +473,23 @@ export function DashboardClient() {
     return () => clearInterval(interval)
   }, [fetchApps])
 
+  const isSkippedApp = (a: AppWithJob) =>
+    a.status === 'NEEDS_REVIEW' && (a as AppWithJob & { errorCode?: string | null }).errorCode?.startsWith('B') === true
+
   const counts = {
-    applied:      apps.filter(a => a.status === 'APPLIED').length,
-    pending:      apps.filter(a => a.status === 'PENDING' || a.status === 'APPLYING').length,
-    failed:       apps.filter(a => a.status === 'FAILED').length,
-    needs_review: apps.filter(a => a.status === 'NEEDS_REVIEW').length,
-    needs_info:   apps.filter(a => a.status === 'NEEDS_INFO').length,
+    applied:               apps.filter(a => a.status === 'APPLIED').length,
+    pending:               apps.filter(a => a.status === 'PENDING' || a.status === 'APPLYING').length,
+    failed:                apps.filter(a => a.status === 'FAILED').length,
+    needs_review:          apps.filter(a => a.status === 'NEEDS_REVIEW' && !isSkippedApp(a)).length,
+    needs_info:            apps.filter(a => a.status === 'NEEDS_INFO').length,
+    skipped:               apps.filter(a => isSkippedApp(a)).length,
+    verification_pending:  apps.filter(a => a.status === 'VERIFICATION_PENDING').length,
   }
 
-  const needsInfo     = apps.filter(a => a.status === 'NEEDS_INFO')
-  const needsAttention = apps.filter(a => a.status === 'NEEDS_REVIEW')
+  const needsInfo            = apps.filter(a => a.status === 'NEEDS_INFO')
+  const verificationPending  = apps.filter(a => a.status === 'VERIFICATION_PENDING')
+  const needsAttention       = apps.filter(a => a.status === 'NEEDS_REVIEW' && !isSkippedApp(a))
+  const skippedApps          = apps.filter(a => isSkippedApp(a))
 
   if (loading) {
     return (
@@ -346,14 +519,40 @@ export function DashboardClient() {
 
   return (
     <div className="space-y-6">
+      {/* Amber banner — verification required */}
+      {verificationPending.length > 0 && (
+        <div className="rounded-xl px-4 py-3 flex items-center gap-3"
+          style={{ background: 'oklch(75% 0.18 55 / 0.12)', border: '1px solid oklch(75% 0.18 55 / 0.4)' }}>
+          <span style={{ color: 'oklch(70% 0.18 55)' }}>&#9888;</span>
+          <p className="text-sm font-medium" style={{ color: 'oklch(65% 0.15 55)' }}>
+            Action required: {verificationPending.length === 1
+              ? `${verificationPending[0].job.company} application needs a verification code`
+              : `${verificationPending.length} applications need verification codes`}
+          </p>
+        </div>
+      )}
+
       {/* Stat cards */}
-      <div className="grid grid-cols-5 gap-3">
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-3">
         <StatCard label="Applied"      value={counts.applied}      color="var(--color-success)" />
         <StatCard label="Pending"      value={counts.pending}      color="var(--color-accent)" />
         <StatCard label="Failed"       value={counts.failed}       color="var(--color-error)" />
         <StatCard label="Needs Review" value={counts.needs_review} color="var(--color-warning)" />
         <StatCard label="Needs Input"  value={counts.needs_info}   color="oklch(65% 0.2 290)" />
+        <StatCard label="Skipped"      value={counts.skipped}      color="oklch(55% 0.01 240)" />
       </div>
+
+      {/* Verification Pending section */}
+      {verificationPending.length > 0 && (
+        <div className="space-y-3">
+          <h2 className="text-sm font-semibold" style={{ color: 'oklch(70% 0.18 55)' }}>
+            Verification Required ({verificationPending.length})
+          </h2>
+          {verificationPending.map(a => (
+            <VerificationCard key={a.id} app={a} onRefresh={() => void fetchApps()} />
+          ))}
+        </div>
+      )}
 
       {/* Needs Your Input section */}
       {needsInfo.length > 0 && (
@@ -385,6 +584,39 @@ export function DashboardClient() {
                     className="text-xs px-3 py-1.5 rounded-lg font-medium flex-shrink-0 transition-all"
                     style={{ background: 'oklch(72% 0.18 75 / 0.15)', color: 'oklch(72% 0.18 75)', border: '1px solid oklch(72% 0.18 75 / 0.3)' }}>
                     Complete manually ↗
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Skipped section */}
+      {skippedApps.length > 0 && (
+        <div className="rounded-2xl p-4 space-y-3"
+          style={{ background: 'oklch(45% 0.01 240 / 0.06)', border: '1px solid oklch(55% 0.01 240 / 0.25)' }}>
+          <p className="text-sm font-semibold" style={{ color: 'oklch(55% 0.01 240)' }}>
+            Skipped — Apply Manually ({skippedApps.length})
+          </p>
+          <div className="space-y-2">
+            {skippedApps.map(a => (
+              <div key={a.id} className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm truncate" style={{ color: 'var(--color-text)' }}>
+                    {a.job.role} at {a.job.company}
+                  </p>
+                  {a.errorMessage && (
+                    <p className="text-xs mt-0.5 leading-relaxed" style={{ color: 'var(--color-text-muted)' }}>
+                      {a.errorMessage}
+                    </p>
+                  )}
+                </div>
+                {a.job.applyUrl && (
+                  <a href={a.job.applyUrl} target="_blank" rel="noopener noreferrer"
+                    className="text-xs px-3 py-1.5 rounded-lg font-medium flex-shrink-0 transition-all"
+                    style={{ background: 'oklch(55% 0.01 240 / 0.15)', color: 'oklch(55% 0.01 240)', border: '1px solid oklch(55% 0.01 240 / 0.3)' }}>
+                    Apply manually ↗
                   </a>
                 )}
               </div>
