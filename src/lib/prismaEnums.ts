@@ -25,6 +25,7 @@ export const AtsType = {
   JOBVITE:             'JOBVITE',
   ICIMS:               'ICIMS',
   TALEO:               'TALEO',
+  TRAKSTAR:            'TRAKSTAR',
   STARTUP_JOBS_NATIVE: 'STARTUP_JOBS_NATIVE',
   CUSTOM:              'CUSTOM',
 } as const

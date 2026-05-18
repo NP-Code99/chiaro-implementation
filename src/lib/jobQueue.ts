@@ -1,19 +1,22 @@
 /**
- * Simple in-memory job queue. Processes one application at a time
- * with a 2-second delay between jobs to avoid rate-limiting.
- * State is not persisted across server restarts (upgrade to Redis for production).
+ * Job queue — calls the TypeScript apply engine directly.
+ * Routing: Greenhouse/Lever → direct API; startup.jobs → Steel.dev; others → CloakBrowser.
+ * CapSolver handles captchas; Scrapfly handles reconnaissance and DataDome bypass.
  */
 
 import { prisma } from '@/lib/db'
-import { applyToJob } from '@/lib/applyEngine'
-import { ApplicationStatus } from '@prisma/client'
+import { ApplicationStatus } from '@/lib/prismaEnums'
 import type { UserProfile } from './userProfile'
-import type { BrowserApplyResult } from './browserApply'
+import { applyToJob } from './applyEngine'
 
 const DELAY_MS = 2000
+
 const queue: string[] = []
-const queued = new Set<string>()   // dedup guard
+const queued = new Set<string>()
 let running = false
+
+
+// ── Queue processor ───────────────────────────────────────────────────────────
 
 async function processNext(): Promise<void> {
   if (running || queue.length === 0) return
@@ -21,8 +24,6 @@ async function processNext(): Promise<void> {
 
   const id = queue.shift()!
   queued.delete(id)
-
-  let updateError: Error | null = null
 
   try {
     const application = await prisma.application.findUnique({
@@ -40,7 +41,7 @@ async function processNext(): Promise<void> {
         where: { id },
         data: {
           status: ApplicationStatus.FAILED,
-          errorMessage: 'Profile missing — please complete your profile and retry.',
+          errorMessage: 'Profile missing — complete your profile and retry.',
         },
       })
       return
@@ -48,16 +49,18 @@ async function processNext(): Promise<void> {
 
     await prisma.application.update({ where: { id }, data: { status: ApplicationStatus.APPLYING } })
 
-    const result = await applyToJob(application.job, profile, id) as BrowserApplyResult
+    const result = await applyToJob(application.job, profile, id)
+
+    console.log(`[Queue] app=${id} status=${result.status}`)
+
+    // browserApply may have already written NEEDS_INFO to the DB — don't overwrite it
+    const current = await prisma.application.findUnique({ where: { id }, select: { status: true } })
+    if (current?.status === ApplicationStatus.NEEDS_INFO) return
 
     const nextStatus =
-      result.status === 'applied'
-        ? ApplicationStatus.APPLIED
-        : result.pendingQuestions && result.pendingQuestions.length > 0
-        ? ApplicationStatus.NEEDS_INFO   // already written by browserApply, just align here
-        : result.status === 'needs_review'
-        ? ApplicationStatus.NEEDS_REVIEW
-        : ApplicationStatus.FAILED
+      result.status === 'applied'      ? ApplicationStatus.APPLIED
+      : result.status === 'needs_review' ? ApplicationStatus.NEEDS_REVIEW
+      : ApplicationStatus.FAILED
 
     await prisma.application.update({
       where: { id },
@@ -68,28 +71,23 @@ async function processNext(): Promise<void> {
       },
     })
 
-    // Persist fillability blocker to the Job so the card deck can show a warning badge
-    if (result.status === 'needs_review' && result.blockerFields && result.blockerFields.length > 0) {
+    if (result.blockerFields && result.blockerFields.length > 0) {
       await prisma.job.update({
         where: { id: application.jobId },
         data: { manualReviewReason: result.blockerFields.join(', ') },
       })
     }
   } catch (err) {
-    updateError = err instanceof Error ? err : new Error(String(err))
+    const msg = err instanceof Error ? err.message : String(err)
     try {
       await prisma.application.update({
         where: { id },
-        data: {
-          status: ApplicationStatus.FAILED,
-          errorMessage: updateError.message,
-        },
+        data: { status: ApplicationStatus.FAILED, errorMessage: msg },
       })
     } catch (dbErr) {
-      console.error('[Queue] Failed to write error status to DB:', dbErr)
+      console.error('[Queue] DB write failed:', dbErr)
     }
   } finally {
-    // Set running = false only after all DB work is done
     running = false
     if (queue.length > 0) {
       setTimeout(() => void processNext(), DELAY_MS)
@@ -98,7 +96,7 @@ async function processNext(): Promise<void> {
 }
 
 export function enqueue(applicationId: string): void {
-  if (queued.has(applicationId)) return   // already queued — skip duplicate
+  if (queued.has(applicationId)) return
   queued.add(applicationId)
   queue.push(applicationId)
   if (!running) void processNext()
