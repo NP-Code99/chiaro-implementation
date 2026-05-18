@@ -41,3 +41,29 @@ next-env.d.ts
 .claude/
 everything-claude-code/
 tsconfig.tsbuildinfo
+
+# runtime artifacts
+/prisma/dev.db
+/prisma/dev.db-journal
+/prisma/*.db
+/results/
+/profiles/
+/public/screenshots/
+/public/test-screenshots/
+/public/diagnostics/
+/public/10-job-test-run/
+/public/debug-startup-form.html
+/public/scrapfly-form.html
+/public/scrapfly-startup-form.html
+/public/screenshots/apply-page.html
+/public/screenshots/base-page.html
+/public/screenshots/challenge-page.html
+
+# python venv & compiled files
+applypilot/.venv/
+applypilot/__pycache__/
+job-applications/__pycache__/
+job-applications/**/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
