@@ -1,0 +1,47 @@
+cover_letter_path: generate
+cover_letter_tone: Professional
+custom_answers:
+  Are you based in Philippines?: 'No'
+  How many years of hands-on SEO experience do you have?: Less than 3 years
+  Please rate your English proficiency: Native
+  What is your level of proficiency in HTML, CSS, and basic JavaScript?: Intermediate
+demographics:
+  disability_status: No disability
+  ethnicity: Prefer not to say
+  gender: Prefer not to say
+  veteran_status: Not a veteran
+education:
+- degree: '[e.g. Bachelor of Science]'
+  field: '[e.g. Computer Science]'
+  gpa: '[e.g. 3.8 or N/A]'
+  graduation_year: '[e.g. 2026]'
+  school: '[e.g. University of Texas at Austin]'
+employment:
+  available_start_date: '[e.g. 2026-07-01]'
+  current_company: '[e.g. Acme Corp or N/A]'
+  current_title: '[e.g. Software Engineering Intern or Student]'
+  desired_salary: '100000'
+  employment_type: Full-time
+  salary_currency: USD
+  willing_to_relocate: false
+  years_of_experience: '1'
+personal:
+  address:
+    city: Charlotte
+    country: '[YOUR COUNTRY — e.g. United States]'
+    state: NC
+    street: '[YOUR STREET ADDRESS]'
+    zip: '[YOUR ZIP/POSTAL CODE]'
+  email: nandanpu@unc.edu
+  first_name: Nandan
+  github: https://github.com/NP-Code99
+  last_name: Pullakandam
+  linkedin: www.linkedin.com/in/nandan-pullakandam
+  phone: '7046251688'
+  portfolio: '[YOUR PORTFOLIO URL or N/A]'
+resume_path: /Users/nandanpullakandam/Nandan_Pullakandam_Resume.pdf
+skills: '[comma-separated list — e.g. Python, React, Node.js, AWS, SQL, Docker]'
+work_authorization:
+  authorized_to_work: true
+  requires_sponsorship: false
+  visa_status: US Citizen

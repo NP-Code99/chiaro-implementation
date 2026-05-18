@@ -1,0 +1,16 @@
+[14:31:54] 
+=================================================================
+[14:31:54] [orchestrator] Mode: SUBMIT
+[14:31:54] [orchestrator] Claude API: ❌ not set
+[14:31:54] =================================================================
+
+[14:31:54] [orchestrator] URL: https://startup.jobs/apply/73105b55-dacc-4b25-ba39-2511bf7bdc2c
+[14:31:54] [orchestrator] Profile: Nandan Pullakandam <nandanpu@unc.edu>
+[14:31:54] [orchestrator] Resume: /Users/nandanpullakandam/Nandan_Pullakandam_Resume.pdf
+[14:31:54] [orchestrator] Detected ATS: UNKNOWN
+[14:31:54] [orchestrator] No ANTHROPIC_API_KEY — skipping Claude strategy
+[14:31:54] [orchestrator] Strategy 2: Legacy (generic)
+[14:31:54] [legacy-strategy] Routing to: apply_engine_scrapfly
+[14:33:45]   ✓ clicked 'Submit'
+[14:33:45] [generic] Submit clicked — waiting for confirmation...
+[14:33:54] [orchestrator] ❌ Legacy strategy failed: Submit clicked but no confirmation found — application status unknown
