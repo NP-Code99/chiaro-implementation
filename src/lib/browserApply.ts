@@ -2064,6 +2064,17 @@ export async function browserApply(
         return { status: 'applied', applyUrl, screenshotUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
       }
 
+      // Greenhouse redirects back to the job listing page on success — no "thank you" page.
+      // Detect by: still on greenhouse.io URL + no validation error visible on page.
+      const GH_ERROR_PATTERNS = [/please fill in/i, /required field/i, /field is required/i, /this field is required/i, /invalid email/i, /please enter/i]
+      const postSubmitUrl = page.url()
+      if (
+        (effectiveUrl.includes('greenhouse.io') || postSubmitUrl.includes('greenhouse.io')) &&
+        !GH_ERROR_PATTERNS.some(p => p.test(finalText))
+      ) {
+        return { status: 'applied', applyUrl, screenshotUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
+      }
+
       return {
         status: 'needs_review',
         errorMessage: 'Submitted — confirm success in screenshot',
