@@ -8,7 +8,9 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env.local') })
 
 import { nanoid } from 'nanoid'
 
-const TEST_URL = 'https://startup.jobs/apply/060b1813-29ab-433a-9cd7-711646841fd7'
+// Pass URL as CLI arg: npx tsx scripts/test-single-apply.ts <url>
+// Defaults to a Greenhouse job via startup.jobs
+const TEST_URL = process.argv[2] ?? 'https://startup.jobs/apply/060b1813-29ab-433a-9cd7-711646841fd7'
 
 import * as fs from 'fs'
 const resumePath = '/Users/nandanpullakandam/Nandan_Pullakandam_Resume.pdf'
@@ -45,8 +47,7 @@ async function main() {
 
   const applicationId = `test-single-${nanoid(8)}`
   console.log(`Application ID: ${applicationId}`)
-  console.log(`URL: ${TEST_URL}`)
-  console.log('Using: Steel.dev (solveCaptcha:true) for native startup.jobs form\n')
+  console.log(`URL: ${TEST_URL}\n`)
 
   const result = await browserApply(TEST_URL, profile, applicationId)
 

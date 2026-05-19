@@ -568,12 +568,17 @@ export async function browserApply(
       }
     }
 
-    // ── STEP 6: Browser launch — CloakBrowser for all sites ──────────────────────
-    // startup.jobs ATS URL is now extracted by Scrapfly before we get here, so
-    // effectiveUrl is a direct Greenhouse/Lever/etc. URL — no CF challenge.
+    // ── STEP 6: Browser launch — route by ATS type ───────────────────────────────
+    // Scrapfly has already resolved the real ATS URL. Now pick the browser:
+    //   • Greenhouse  → CloakBrowser + CapSolver (Greenhouse blocks Steel's proxy IP)
+    //   • Everything else (Lever, Workday, BambooHR, Ashby, etc.) → Steel.dev
+    //     (Steel's residential proxy pool handles Cloudflare on these sites)
+    //   • Native Wellfound → CloakBrowser (DataDome path — unchanged)
+    const isGreenhouseUrl = effectiveUrl.includes('greenhouse.io') || resolved.atsType === 'GREENHOUSE'
     const isStartupJobsNative = false  // never true after Scrapfly URL extraction
     const steelApiKey = process.env.STEEL_API_KEY
-    const useSteel = false  // Steel disabled — CloakBrowser + Scrapfly handles everything
+    const useSteel = !isGreenhouseUrl && !isNativeWellfound && !!steelApiKey
+    console.log(`[browserApply] ATS routing: ${resolved.atsType ?? 'unknown'} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
     let context: import('playwright').BrowserContext
 
