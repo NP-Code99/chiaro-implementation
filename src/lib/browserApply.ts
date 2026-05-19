@@ -121,7 +121,7 @@ async function humanScroll(page: import('playwright').Page): Promise<void> {
       window.scrollTo(0, (total / steps) * i)
       await new Promise(r => setTimeout(r, 200 + Math.random() * 200))
     }
-    window.scrollTo(0, 0)
+    // Stay at bottom — submit button is there; do not reset to top
   })
 }
 
@@ -1986,25 +1986,28 @@ export async function browserApply(
         }
       }
 
-      // All fields verified — scroll to bottom so submit button is visible
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
-      await page.waitForTimeout(800)
+      // Find the submit button — Greenhouse uses #submit_app specifically.
+      // page.evaluate only accepts native CSS selectors; Playwright :has-text is used separately.
+      const submitNativeSelector = await page.evaluate((): string | null => {
+        // Priority: Greenhouse-specific ID → disabled-free type → text match → any type
+        const byId = document.querySelector('#submit_app')
+        if (byId) return '#submit_app'
+        const SUBMIT_TEXT = ['submit application', 'send application', 'apply now', 'complete application', 'submit app']
+        const allBtns = Array.from(document.querySelectorAll('button, input[type="submit"]'))
+        for (const btn of allBtns) {
+          const txt = (btn.textContent ?? (btn as HTMLInputElement).value ?? '').trim().toLowerCase()
+          if (SUBMIT_TEXT.some(t => txt.includes(t))) {
+            return btn.id ? `#${btn.id}` : btn.getAttribute('type') === 'submit' ? 'button[type="submit"]' : null
+          }
+        }
+        const noDisabled = document.querySelector('button[type="submit"]:not([disabled]), input[type="submit"]:not([disabled])')
+        if (noDisabled) return noDisabled.tagName === 'BUTTON' ? 'button[type="submit"]:not([disabled])' : 'input[type="submit"]:not([disabled])'
+        if (document.querySelector('button[type="submit"]')) return 'button[type="submit"]'
+        if (document.querySelector('input[type="submit"]')) return 'input[type="submit"]'
+        return null
+      })
 
-      // Take pre-submit screenshot
-      const preSubmitUrl = await takeScreenshot(page, `pre-submit-${applicationId}`)
-
-      // Find submit button
-      const submitLocator = page.locator(
-        'button:has-text("Send application"), ' +
-        'button:has-text("Submit application"), ' +
-        'button:has-text("Submit Application"), ' +
-        'button[type="submit"], ' +
-        'input[type="submit"]'
-      ).first()
-
-      const submitVisible = await submitLocator.isVisible({ timeout: 5000 }).catch(() => false)
-
-      if (!submitVisible) {
+      if (!submitNativeSelector) {
         const screenshotUrl = await takeScreenshot(page, applicationId)
         await prisma.application.update({ where: { id: applicationId }, data: { bypassMethod } }).catch(() => {})
         const btns = await page.evaluate(() =>
@@ -2015,10 +2018,24 @@ export async function browserApply(
           errorMessage: `Could not find Submit button. Buttons found: ${btns.slice(0, 5).join(', ')}`,
           applyUrl,
           screenshotUrl,
-          preSubmitScreenshotUrl: preSubmitUrl,
           bypassMethod,
         }
       }
+
+      // Scroll the button into view using the element's own scrollIntoView —
+      // works even when the scrollable container is not window/body.
+      await page.evaluate((sel: string) => {
+        const el = document.querySelector(sel)
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }, submitNativeSelector)
+      await page.waitForTimeout(800)
+
+      const submitLocator = page.locator(submitNativeSelector).first()
+      await submitLocator.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {})
+      await page.waitForTimeout(400)
+
+      // Take pre-submit screenshot
+      const preSubmitUrl = await takeScreenshot(page, `pre-submit-${applicationId}`)
 
       // Human-like pause before clicking submit
       await new Promise(r => setTimeout(r, 1500 + Math.random() * 2000))
@@ -2402,24 +2419,52 @@ export async function browserApply(
         }
       }
 
-      // Look for Submit button using locator (more reliable than page.$)
-      // Greenhouse new board uses "Submit application" (lowercase 'a') — has-text is case-insensitive.
-      //
-      // Trakstar: use a narrow selector that targets only the actual submit button inside
-      // #job_application_form.  Trakstar pages also show "Apply with Indeed" and
-      // "Apply with LinkedIn" buttons that match the broad selectors below — clicking those
-      // instead of the form's own Submit button sends the user to Indeed/LinkedIn, not Trakstar.
+      // Find Submit button in DOM first (no viewport requirement), then scroll to it.
+      // Trakstar: narrow to #job_application_form to avoid "Apply with Indeed/LinkedIn" buttons.
+      // Greenhouse: #submit_app is the specific ID; fallback to generic selectors.
       const isTrakstarPage = page.url().includes('trakstar.com')
-      const submitLocatorAts = isTrakstarPage
-        ? page.locator('#job_application_form button[type="submit"], #job_application_form input[type="submit"]').first()
-        : page.locator(
-            'button[type="submit"], input[type="submit"], ' +
-            'button:has-text("Submit application"), button:has-text("Submit Application"), ' +
-            'button:has-text("Apply Now"), button:has-text("Send Application"), ' +
-            'button:has-text("Apply"), button:has-text("Complete Application")'
-          ).first()
+      const foundAtsSelector = await page.evaluate((isTrakstar: boolean): string | null => {
+        if (isTrakstar) {
+          if (document.querySelector('#job_application_form button[type="submit"]')) return '#job_application_form button[type="submit"]'
+          if (document.querySelector('#job_application_form input[type="submit"]')) return '#job_application_form input[type="submit"]'
+          return null
+        }
+        if (document.querySelector('#submit_app')) return '#submit_app'
+        const SUBMIT_TEXT = ['submit application', 'send application', 'apply now', 'complete application']
+        const allBtns = Array.from(document.querySelectorAll('button, input[type="submit"]'))
+        for (const btn of allBtns) {
+          const txt = (btn.textContent ?? (btn as HTMLInputElement).value ?? '').trim().toLowerCase()
+          if (SUBMIT_TEXT.some(t => txt.includes(t))) {
+            return btn.id ? `#${btn.id}` : 'button[type="submit"]'
+          }
+        }
+        const noDisabled = document.querySelector('button[type="submit"]:not([disabled]), input[type="submit"]:not([disabled])')
+        if (noDisabled) return noDisabled.tagName === 'BUTTON' ? 'button[type="submit"]:not([disabled])' : 'input[type="submit"]:not([disabled])'
+        if (document.querySelector('button[type="submit"]')) return 'button[type="submit"]'
+        if (document.querySelector('input[type="submit"]')) return 'input[type="submit"]'
+        return null
+      }, isTrakstarPage)
 
-      const atsSubmitVisible = await submitLocatorAts.isVisible({ timeout: 3000 }).catch(() => false)
+      // Scroll the button into view before checking visibility
+      if (foundAtsSelector) {
+        await page.evaluate((sel: string) => {
+          const el = document.querySelector(sel)
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        }, foundAtsSelector)
+        await page.waitForTimeout(600)
+      }
+
+      const submitLocatorAts = foundAtsSelector
+        ? page.locator(foundAtsSelector).first()
+        : page.locator('button[type="submit"], input[type="submit"]').first()
+
+      if (foundAtsSelector) {
+        await submitLocatorAts.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+      }
+
+      const atsSubmitVisible = foundAtsSelector
+        ? await submitLocatorAts.isVisible({ timeout: 3000 }).catch(() => false)
+        : false
 
       if (atsSubmitVisible) {
         // ── STEP 9: Submit ──────────────────────────────────────────────────
