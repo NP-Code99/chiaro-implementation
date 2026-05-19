@@ -109,7 +109,9 @@ async def _run_claude_strategy(url: str, profile: dict) -> dict:
         if submitted or DRY_RUN:
             return {"status": "applied"}
         else:
-            raise RuntimeError("Claude filler did not confirm submission")
+            # Submission unconfirmed — flag for manual review rather than hard-fail
+            log("[orchestrator] ⚠ Claude strategy: submit unconfirmed — flagging for review")
+            return {"status": "needs_review", "error": "Submit unconfirmed by Claude strategy"}
 
     except Exception:
         await screenshot(page, "error_claude_strategy")

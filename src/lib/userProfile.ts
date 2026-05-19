@@ -10,6 +10,7 @@ export interface UserProfile {
   lastName: string
   email: string
   phone: string
+  phoneCountryCode?: string
   linkedin: string
   github: string
   location: string

@@ -5,6 +5,28 @@ import { useRouter } from 'next/navigation'
 import { saveProfile, loadProfile, profileCompletionPct, generateApplicationPassword, type UserProfile, type WorkAuth, type YearsExp, type VeteranStatus, type DisabilityStatus, type Gender, type Ethnicity } from '@/lib/userProfile'
 import toast from 'react-hot-toast'
 
+const COUNTRY_CODE_OPTIONS = [
+  { label: '+1 (US/Canada)', value: '+1' },
+  { label: '+44 (UK)', value: '+44' },
+  { label: '+91 (India)', value: '+91' },
+  { label: '+61 (Australia)', value: '+61' },
+  { label: '+49 (Germany)', value: '+49' },
+  { label: '+33 (France)', value: '+33' },
+  { label: '+81 (Japan)', value: '+81' },
+  { label: '+86 (China)', value: '+86' },
+  { label: '+55 (Brazil)', value: '+55' },
+  { label: '+52 (Mexico)', value: '+52' },
+  { label: '+65 (Singapore)', value: '+65' },
+  { label: '+971 (UAE)', value: '+971' },
+  { label: '+972 (Israel)', value: '+972' },
+  { label: '+31 (Netherlands)', value: '+31' },
+  { label: '+46 (Sweden)', value: '+46' },
+  { label: '+47 (Norway)', value: '+47' },
+  { label: '+45 (Denmark)', value: '+45' },
+  { label: '+358 (Finland)', value: '+358' },
+  { label: '+41 (Switzerland)', value: '+41' },
+  { label: '+48 (Poland)', value: '+48' },
+]
 const WORK_AUTH_OPTIONS: WorkAuth[] = ['US Citizen', 'Green Card', 'H1B Visa', 'Need Sponsorship']
 const YEARS_EXP_OPTIONS: YearsExp[] = ['0-1', '1-3', '3-5', '5-8', '8-12', '12+']
 const VETERAN_OPTIONS: VeteranStatus[] = ['I am not a protected veteran', 'I identify as one or more of the classifications of a protected veteran', "I don't wish to answer"]
@@ -13,7 +35,7 @@ const GENDER_OPTIONS: Gender[] = ['Male', 'Female', 'Non-binary', 'Prefer not to
 const ETHNICITY_OPTIONS: Ethnicity[] = ['Asian', 'Black or African American', 'Hispanic or Latino', 'Native American or Alaska Native', 'Native Hawaiian or Pacific Islander', 'Two or more races', 'White', 'Prefer not to say']
 
 const EMPTY: UserProfile = {
-  firstName: '', lastName: '', email: '', phone: '',
+  firstName: '', lastName: '', email: '', phone: '', phoneCountryCode: '+1',
   linkedin: '', github: '', location: '',
   workAuth: 'US Citizen', yearsExp: '1-3',
   desiredSalary: '',
@@ -131,8 +153,18 @@ export function ProfileForm() {
         </div>
         <div>
           <label className={labelCls} style={{ color: 'var(--color-text-muted)' }}>Phone</label>
-          <input type="tel" value={form.phone} onChange={field('phone')}
-            placeholder="+1 415 555 0100" className={inputCls} />
+          <div className="flex gap-2">
+            <select
+              value={form.phoneCountryCode ?? '+1'}
+              onChange={field('phoneCountryCode')}
+              className={inputCls}
+              style={{ width: '30%', flexShrink: 0 }}
+            >
+              {COUNTRY_CODE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <input type="tel" value={form.phone} onChange={field('phone')}
+              placeholder="415 555 0100" className={inputCls} style={{ flex: 1 }} />
+          </div>
         </div>
       </div>
 

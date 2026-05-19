@@ -1,15 +1,20 @@
 """
-Orchestrator — applies to all jobs via Scrapfly + playwright-stealth engine.
+Orchestrator — applies to all jobs.
+
+Greenhouse URLs are handled by the dedicated API+Playwright pipeline
+(scripts/greenhouse.py → scripts/greenhouse_playwright_backup.py).
+All other ATS platforms fall through to the Scrapfly+Claude engine.
 
 Usage:
-  python main.py                              # Dry-run all URLs
-  python main.py --submit                     # Submit all
-  python main.py --submit --platform trakstar # Submit only Trakstar URLs
-  python main.py --submit --url "https://..." # Submit a single URL
+  python main.py                               # Dry-run all URLs
+  python main.py --dry-run                     # Explicit dry-run
+  python main.py --platform greenhouse         # Only Greenhouse URLs
+  python main.py --url "https://..."           # Single URL
 """
 import asyncio, sys, os
 from utils.ats_detector import detect_ats
 from utils.logger import log
+
 
 URLS = [
     "https://ccbill.bamboohr.com/careers/286",
@@ -24,25 +29,48 @@ URLS = [
     "https://bunnynet.teamtailor.com/jobs/6636274-staff-software-engineer-magic-containers",
 ]
 
-async def run_all(urls: list, platform_filter: str | None = None):
-    # Import here so env vars (SCRAPFLY_API_KEY etc.) are already set
-    from apply_engine_scrapfly import apply
 
+def _resolve_startup_jobs(url: str) -> str:
+    """Follow startup.jobs redirect to the real ATS URL (no-op for other URLs)."""
+    if "startup.jobs" not in url:
+        return url
+    try:
+        from apply_engine_scrapfly import resolve_startup_jobs_url
+        return resolve_startup_jobs_url(url)
+    except Exception as exc:
+        log(f"[main] startup.jobs resolve failed: {exc} — using original URL")
+        return url
+
+
+async def _apply_one(url: str) -> None:
+    """Dispatch a single URL to the correct ATS handler."""
+    resolved = _resolve_startup_jobs(url)
+    ats = detect_ats(resolved)
+
+    if ats == "greenhouse":
+        from scripts.greenhouse import apply as gh_apply
+        await gh_apply(resolved)
+    else:
+        from apply_engine_scrapfly import apply as engine_apply
+        await engine_apply(resolved)
+
+
+async def run_all(urls: list, platform_filter: str | None = None):
     results = []
     for url in urls:
-        ats = detect_ats(url)
+        resolved = _resolve_startup_jobs(url)
+        ats = detect_ats(resolved)
         if platform_filter and ats != platform_filter:
             continue
 
         log(f"\n[main] ▶ {ats.upper()} → {url}")
         try:
-            await apply(url)
+            await _apply_one(url)
             results.append({"url": url, "ats": ats, "status": "✅ SUCCESS"})
         except Exception as err:
             log(f"[main] ❌ Failed: {err}")
             results.append({"url": url, "ats": ats, "status": f"❌ FAILED: {err}"})
 
-        # Brief pause between applications
         await asyncio.sleep(5)
 
     log("\n" + "═" * 70)

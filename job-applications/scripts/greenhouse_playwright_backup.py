@@ -1,319 +1,128 @@
 """
-Greenhouse application script.
-Targets:
-  https://www.digicert.com/careers?gh_jid=8524673002#application_form
-  https://job-boards.greenhouse.io/scoutmotors/jobs/5128323007
+Greenhouse Playwright filler.
+
+Primary path: fetch questions from the API, compute answers with map_answers(),
+then fill the new Remix-based job-boards.greenhouse.io UI via Playwright.
+
+The new Greenhouse UI uses:
+  - <input id="field_name"> for text/email/phone fields
+  - <input id="question_XXXXXXX"> for custom text questions
+  - React Select components with aria-labelledby="field_name-label" for dropdowns
+  - <input id="resume"> / <input id="cover_letter"> hidden file inputs
+  - <select id="gender"> etc. for EEO native selects
+
+Falls back to blind best-effort fill when API is unavailable.
 """
-import asyncio, json, os, sys, yaml
+import asyncio
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from utils.browser import new_browser, human_delay, screenshot
-from utils.captcha import check_and_solve
-from utils.form_filler import fill_text, upload_file, submit_and_confirm
-from utils.cover_letter import generate_cover_letter
 from utils.logger import log
+from utils.profile_loader import load_profile
 
-_PROFILE_YAML = Path(__file__).parent.parent / "profile.yaml"
-
-def _load():
-    global PROFILE, P, E, D
-    try:
-        PROFILE = yaml.safe_load(_PROFILE_YAML.read_text())
-    except Exception:
-        PROFILE = {}
-    P = PROFILE.get("personal", {})
-    E = PROFILE.get("employment", {})
-    D = PROFILE.get("demographics", {})
-
-PROFILE: dict = {}; P: dict = {}; E: dict = {}; D: dict = {}
-_load()
 DRY_RUN = "--dry-run" in sys.argv
 
-# ── Greenhouse custom dropdown helper ─────────────────────────────────────────
 
-async def _gh_select(page, label_text: str, value: str) -> bool:
+# ── React Select helper ────────────────────────────────────────────────────────
+
+async def _fill_dropdown(page, field_name: str, label_text: str) -> bool:
     """
-    Fill a Greenhouse custom dropdown (the styled divs with ▼).
-    Greenhouse uses a React select component — find by label, click to open,
-    then click the matching option.
-    Returns True if successfully selected.
+    Fill a React Select dropdown for a given Greenhouse field_name.
+    DOM structure: INPUT#field_name[role=combobox] → input-container → value-container → select__control
+    Must use Playwright's native mouse click (not JS .click()) to trigger React events.
     """
-    # Find the label element, then the associated select/custom-select nearby
-    label_el = None
-    for lb_sel in [
-        f"label:has-text('{label_text}')",
-        f"span:has-text('{label_text}')",
-        f"div:has-text('{label_text}')",
-    ]:
-        try:
-            label_el = await page.query_selector(lb_sel)
-            if label_el:
-                break
-        except Exception:
-            pass
-
-    if not label_el:
-        return False
-
-    # 1. Try native select first (fastest path)
     try:
-        parent = await label_el.evaluate_handle("el => el.closest('.field, .form-field, [class*=\"field\"], [class*=\"form\"], div')")
-        if parent:
-            native_sel = await parent.query_selector("select")
-            if native_sel:
-                try:
-                    await page.select_option(await native_sel.get_attribute("id") or "select", label=value)
-                    log(f"  ✓ gh-select (native) '{label_text}' ← {value}")
-                    return True
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    # 2. Find select by for= attribute on label
-    for_id = await label_el.get_attribute("for") if label_el else None
-    if for_id:
-        try:
-            await page.select_option(f"#{for_id}", label=value)
-            log(f"  ✓ gh-select (for-id) '{label_text}' ← {value}")
-            return True
-        except Exception:
-            pass
-        # Custom dropdown with same id
-        try:
-            trigger = await page.query_selector(f"#{for_id}")
-            if trigger:
-                await trigger.click()
-                await human_delay(300, 500)
-                await page.click(f"text={value}", timeout=2000)
-                log(f"  ✓ gh-select (custom) '{label_text}' ← {value}")
-                return True
-        except Exception:
-            pass
-
-    # 3. Try Greenhouse's generic custom select pattern:
-    #    click the first "Select..." placeholder near the label, then pick option
-    try:
-        # Greenhouse wraps each question in a div.field or similar
-        # Find the container that has our label text, then find its select trigger
-        js_result = await page.evaluate("""(labelText) => {
-            const all = document.querySelectorAll('label, [class*="label"]');
-            for (const lb of all) {
-                if (!lb.textContent.includes(labelText)) continue;
-                // Walk up to the field container
-                const container = lb.closest('[class*="field"], [class*="question"], div');
-                if (!container) continue;
-                // Find a native select or a custom select trigger
-                const sel = container.querySelector('select');
-                if (sel) return {type: 'native', id: sel.id, name: sel.name};
-                const trigger = container.querySelector('[class*="select"], [role="combobox"], [data-select]');
-                if (trigger) return {type: 'custom', id: trigger.id, class: trigger.className};
-                return null;
-            }
-            return null;
-        }""", label_text)
-
-        if js_result:
-            if js_result.get("type") == "native":
-                sel_id = js_result.get("id") or js_result.get("name")
-                await page.select_option(f"#{sel_id}" if js_result.get("id") else f"[name='{sel_id}']", label=value)
-                log(f"  ✓ gh-select (js-native) '{label_text}' ← {value}")
-                return True
-    except Exception:
-        pass
-
-    return False
-
-
-_GH_EXTRACT_ALL_DROPDOWNS_JS = """() => {
-    const results = [];
-    const seen = new Set();
-
-    function getLabel(el) {
-        if (el.id) {
-            const lb = document.querySelector('label[for="' + el.id + '"]');
-            if (lb) return lb.textContent.trim().replace(/\\s*\\*\\s*$/, '').trim();
-        }
-        const ariaLb = el.getAttribute('aria-label') || el.getAttribute('aria-labelledby');
-        if (ariaLb && !ariaLb.includes(' ')) {
-            const lbEl = document.getElementById(ariaLb);
-            if (lbEl) return lbEl.textContent.trim();
-        }
-        if (ariaLb) return ariaLb.trim();
-        const container = el.closest('[class*="field"], [class*="form"], [class*="question"], fieldset, div');
-        if (container) {
-            const lbEl = container.querySelector('label, [class*="label"], legend');
-            if (lbEl && !lbEl.contains(el)) return lbEl.textContent.trim().replace(/\\s*\\*\\s*$/, '').trim();
-        }
-        return el.name || el.id || '';
-    }
-
-    // 1. Native <select> elements
-    document.querySelectorAll('select').forEach(sel => {
-        if (!sel.offsetParent) return;
-        if (sel.value && sel.value !== '' && sel.value !== '0') return;
-        const opts = Array.from(sel.options)
-            .map(o => o.text.trim())
-            .filter(t => t && !['select...', 'select', '', '-- select --', '-- select one --'].includes(t.toLowerCase()));
-        if (!opts.length) return;
-        const key = sel.id || sel.name;
-        if (seen.has(key)) return;
-        seen.add(key);
-        results.push({
-            type: 'native',
-            selector: sel.id ? '#' + sel.id : (sel.name ? '[name="' + sel.name + '"]' : null),
-            label: getLabel(sel),
-            options: opts,
-        });
-    });
-
-    // 2. React Select custom dropdowns (Greenhouse uses these for custom questions)
-    // Pattern A: containers with class containing "css-" and "container"
-    // Pattern B: elements with role="combobox" that aren't native selects
-    // Pattern C: divs that look like select triggers (have aria-haspopup="listbox")
-
-    const customSelectors = [
-        '[role="combobox"]',
-        '[aria-haspopup="listbox"]',
-        '[class*="react-select__control"]',
-        '[class*="__control"][class*="css-"]',
-    ];
-
-    customSelectors.forEach(csel => {
-        document.querySelectorAll(csel).forEach(el => {
-            if (!el.offsetParent) return;
-            if (el.tagName === 'SELECT' || el.tagName === 'INPUT') return;
-
-            // Find the container to get the label
-            const container = el.closest('[class*="field"], [class*="question"], [class*="form-group"], fieldset, div[id]');
-            const label = container ? getLabel(container.querySelector('label, [class*="label"]') || container) : getLabel(el);
-            if (!label) return;
-
-            const key = 'custom:' + label;
-            if (seen.has(key)) return;
-            seen.add(key);
-
-            // Try to get the current value (placeholder or selected text)
-            const valueEl = el.querySelector('[class*="single-value"], [class*="placeholder"]') || el;
-            const currentText = (valueEl.textContent || '').trim();
-            const isPlaceholder = el.querySelector('[class*="placeholder"]') !== null;
-
-            // Only include if not yet filled (still showing placeholder)
-            if (!isPlaceholder && currentText && !['select...', 'select'].includes(currentText.toLowerCase())) {
-                return; // already filled
-            }
-
-            // Build a CSS selector for this element
-            let elSel = null;
-            if (el.id) elSel = '#' + el.id;
-            else if (el.getAttribute('aria-controls')) elSel = '[aria-controls="' + el.getAttribute('aria-controls') + '"]';
-            else if (el.className) {
-                // Use the most specific class
-                const classes = el.className.split(' ').filter(c => c.includes('css-') || c.includes('select') || c.includes('control'));
-                if (classes.length) elSel = '.' + classes[0].replace(/:/g, '\\\\:');
-            }
-
-            results.push({
-                type: 'custom',
-                selector: elSel,
-                elementIndex: Array.from(document.querySelectorAll(csel)).indexOf(el),
-                querySelector: csel,
-                label: label,
-                options: [],  // will be fetched after clicking
-                currentText: currentText,
-            });
-        });
-    });
-
-    return results;
-}"""
-
-
-async def _react_select_choose(page, field_info: dict, chosen_value: str) -> bool:
-    """
-    Interact with a React Select (or similar) custom dropdown.
-    1. Click the control to open it
-    2. Wait for options to appear
-    3. Click the matching option
-    Returns True on success.
-    """
-    csel = field_info.get("querySelector", '[role="combobox"]')
-    idx = field_info.get("elementIndex", 0)
-    sel = field_info.get("selector")
-    label = field_info.get("label", "dropdown")
-
-    try:
-        # Find the clickable control element
-        if sel:
-            try:
-                ctrl = await page.wait_for_selector(sel, timeout=3000, state="visible")
-            except Exception:
-                ctrl = None
-        else:
-            ctrl = None
-
-        if not ctrl:
-            # Fall back to index-based selection
-            all_controls = await page.query_selector_all(csel)
-            if idx >= len(all_controls):
-                return False
-            ctrl = all_controls[idx]
-
-        if not ctrl:
+        # The React Select combobox input has id matching the field name
+        inp = await page.query_selector(f'input#{field_name}[role="combobox"]')
+        if not inp:
+            inp = await page.query_selector(f'input[aria-labelledby*="{field_name}-label"]')
+        if not inp:
+            log(f"  ✗ dropdown {field_name}: input not found")
             return False
 
-        await ctrl.scroll_into_view_if_needed()
-        await human_delay(200, 400)
-        await ctrl.click()
-        await human_delay(400, 700)
+        await inp.scroll_into_view_if_needed()
+        await human_delay(150, 250)
 
-        # Wait for options to appear
-        option_selectors = [
-            '[role="option"]',
-            '[class*="__option"]',
-            '[class*="react-select__option"]',
-            '[class*="menu"] [class*="option"]',
-        ]
+        # Get center coordinates of the .select__control div (3 levels above the input)
+        # input → input-container → value-container → select__control
+        coords = await page.evaluate("""(fn) => {
+            const inp = document.querySelector(`input#${fn}[role="combobox"]`)
+                     || document.querySelector(`input[aria-labelledby*="${fn}-label"]`);
+            if (!inp) return null;
+            const ctrl = inp.parentElement?.parentElement?.parentElement;
+            if (!ctrl) return null;
+            const r = ctrl.getBoundingClientRect();
+            return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+        }""", field_name)
 
-        options_visible = False
-        for opt_sel in option_selectors:
-            try:
-                await page.wait_for_selector(opt_sel, timeout=2000, state="visible")
-                options_visible = True
+        if coords:
+            await page.mouse.click(coords["x"], coords["y"])
+        else:
+            await inp.click()
+        await human_delay(300, 500)
+
+        # Open the dropdown: ArrowDown on the focused input (most reliable for React Select)
+        await inp.focus()
+        await human_delay(150, 250)
+        await inp.press("ArrowDown")
+        await human_delay(400, 600)
+
+        # Wait for at least one NEW visible option to appear
+        # The ITI phone library pre-renders 244+ hidden [role=option] elements —
+        # only count visible ones (offsetParent !== null).
+        visible_opts = []
+        for _ in range(10):  # poll up to ~2s
+            visible_opts = await page.evaluate("""() =>
+                Array.from(document.querySelectorAll('[role="option"]'))
+                    .filter(o => o.offsetParent !== null)
+                    .map(o => o.textContent.trim())
+            """)
+            if visible_opts:
                 break
-            except Exception:
-                continue
+            await human_delay(200, 250)
 
-        if not options_visible:
-            log(f"  ✗ custom dropdown '{label}' — no options appeared after click")
+        if not visible_opts:
+            log(f"  ✗ dropdown {field_name}: no visible options after ArrowDown")
             await page.keyboard.press("Escape")
             return False
 
-        # Find and click the matching option
-        chosen_lower = chosen_value.lower()
-        opts = await page.query_selector_all('[role="option"], [class*="__option"]')
-        for opt in opts:
-            text = (await opt.inner_text()).strip()
-            if text.lower() == chosen_lower or chosen_lower in text.lower() or text.lower() in chosen_lower:
-                await opt.click()
-                log(f"  ✓ custom-select '{label}' ← {text}")
-                await human_delay(200, 400)
-                return True
+        # Click the matching visible option via JavaScript (avoids stale handle issues)
+        label_lower = label_text.lower()
+        matched = await page.evaluate("""([labelLower]) => {
+            const opts = Array.from(document.querySelectorAll('[role="option"]'))
+                             .filter(o => o.offsetParent !== null);
+            // Exact match first
+            for (const o of opts) {
+                if (o.textContent.trim().toLowerCase() === labelLower) {
+                    o.click();
+                    return o.textContent.trim();
+                }
+            }
+            // Substring match
+            for (const o of opts) {
+                const t = o.textContent.trim().toLowerCase();
+                if (t.includes(labelLower) || labelLower.includes(t)) {
+                    o.click();
+                    return o.textContent.trim();
+                }
+            }
+            return null;
+        }""", [label_lower])
 
-        # No exact match — try partial
-        for opt in opts:
-            text = (await opt.inner_text()).strip()
-            if any(word in text.lower() for word in chosen_lower.split() if len(word) > 3):
-                await opt.click()
-                log(f"  ✓ custom-select '{label}' ← {text} (partial match for '{chosen_value}')")
-                await human_delay(200, 400)
-                return True
+        if matched:
+            log(f"  ✓ dropdown '{field_name}' ← {matched}")
+            await human_delay(150, 300)
+            return True
 
-        log(f"  ✗ custom-select '{label}' — no option matched '{chosen_value}'")
+        log(f"  ✗ dropdown '{field_name}': no visible option matched '{label_text}' (got: {visible_opts[:4]})")
         await page.keyboard.press("Escape")
         return False
 
     except Exception as exc:
-        log(f"  ✗ custom-select '{label}': {exc}")
+        log(f"  ✗ dropdown '{field_name}': {exc}")
         try:
             await page.keyboard.press("Escape")
         except Exception:
@@ -321,260 +130,367 @@ async def _react_select_choose(page, field_info: dict, chosen_value: str) -> boo
         return False
 
 
-async def _gh_select_all_remaining(page, profile: dict) -> None:
-    """
-    Find every unfilled dropdown (native <select> AND React Select custom components)
-    and fill them using demographic profile data or Claude for custom questions.
-    """
-    try:
-        import anthropic as _anthropic
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        client = _anthropic.Anthropic(api_key=api_key) if api_key else None
-    except ImportError:
-        client = None
+# ── EEO native selects ─────────────────────────────────────────────────────────
 
-    p = profile.get("personal", {})
-    wa = profile.get("work_authorization", {})
+def _eeo_hint(field: str, profile_val: str) -> list[str]:
+    """Return ordered label hints for Greenhouse EEO options, best match first."""
+    v = profile_val.lower()
+    if field == "veteran_status":
+        if "not" in v or "no" in v:
+            return ["I am not a protected veteran", "not a protected", "I don't wish", "Decline"]
+        return ["I don't wish to answer", "Decline", "I am not a protected veteran"]
+    if field == "disability_status":
+        if "no" in v and "disability" in v:
+            return ["No, I do not have a disability", "I do not have", "I do not want", "Decline"]
+        return ["I do not want", "Decline", "No, I do not have a disability"]
+    if field == "hispanic_ethnicity":
+        return ["Decline", "I don't wish", "No"]
+    # gender, race, other: profile value first, then Decline fallbacks
+    return [profile_val, "Decline To Self Identify", "Decline", "I don't wish"]
+
+
+async def _fill_eeo(page, profile: dict) -> None:
+    """Fill Greenhouse EEOC React Select dropdowns at the bottom of the form."""
     d = profile.get("demographics", {})
-    e = profile.get("employment", {})
-
-    candidate_context = (
-        f"Candidate: {p.get('first_name')} {p.get('last_name')}, "
-        f"location: {p.get('address', {}).get('city')}, {p.get('address', {}).get('state')}, "
-        f"work auth: {'authorized, no sponsorship needed' if wa.get('authorized_to_work') and not wa.get('requires_sponsorship') else 'needs sponsorship'}, "
-        f"experience: {e.get('years_of_experience')} years, "
-        f"title: {e.get('current_title', '')}"
-    )
-
-    unfilled = await page.evaluate(_GH_EXTRACT_ALL_DROPDOWNS_JS)
-    if not unfilled:
-        log("[greenhouse] No unfilled dropdowns found")
-        return
-
-    log(f"[greenhouse] Found {len(unfilled)} unfilled dropdowns ({sum(1 for f in unfilled if f['type'] == 'native')} native, {sum(1 for f in unfilled if f['type'] == 'custom')} custom)")
-
-    # EEO/demographic keyword mapping
-    eeo_keywords = {
-        "gender":       d.get("gender", "Prefer not to say"),
-        "sex":          d.get("gender", "Prefer not to say"),
-        "race":         d.get("ethnicity", "Prefer not to say"),
-        "ethnicity":    d.get("ethnicity", "Prefer not to say"),
-        "veteran":      d.get("veteran_status", "I don't wish to answer"),
-        "disability":   d.get("disability_status", "I don't wish to answer"),
-        "country":      p.get("address", {}).get("country", "United States"),
-    }
-
-    for field_info in unfilled:
-        field_type = field_info.get("type", "native")
-        label = (field_info.get("label") or "").lower()
-        opts = field_info.get("options", [])
-        chosen = None
-
-        # --- Determine value ---
-        # 1. EEO/demographic match by label keyword
-        for keyword, val in eeo_keywords.items():
-            if keyword in label:
-                if field_type == "native" and opts:
-                    for opt in opts:
-                        if val.lower() in opt.lower() or opt.lower() in val.lower():
-                            chosen = opt
-                            break
-                    if not chosen:
-                        # Fallback: pick "prefer not" / "don't wish" option
-                        for opt in opts:
-                            if any(x in opt.lower() for x in ["prefer not", "wish to answer", "decline", "no answer"]):
-                                chosen = opt
-                                break
-                else:
-                    # Custom dropdown — we'll try the demographic value directly
-                    chosen = val
+    eeo_fields = [
+        ("gender",            d.get("gender", "Prefer not to say")),
+        ("hispanic_ethnicity", "Prefer not to say"),
+        ("race",              d.get("ethnicity", "Prefer not to say")),
+        ("veteran_status",    d.get("veteran_status", "I don't wish to answer")),
+        ("disability_status", d.get("disability_status", "I don't wish to answer")),
+    ]
+    for field_name, profile_val in eeo_fields:
+        inp = await page.query_selector(f"input#{field_name}[role='combobox']")
+        if not inp:
+            continue
+        hints = _eeo_hint(field_name, profile_val)
+        for hint in hints:
+            ok = await _fill_dropdown(page, field_name, hint)
+            if ok:
                 break
 
-        # 2. Work authorization
-        if not chosen:
-            if any(kw in label for kw in ["authorized", "work authorization", "legally authorized", "visa", "sponsorship"]):
-                if "sponsor" in label:
-                    chosen_bool = wa.get("requires_sponsorship", False)
-                    chosen = "Yes" if chosen_bool else "No"
-                else:
-                    chosen_bool = wa.get("authorized_to_work", True)
-                    chosen = "Yes" if chosen_bool else "No"
 
-        # 3. Years of experience
-        if not chosen and any(kw in label for kw in ["years of experience", "experience level", "how many years"]):
-            yrs = str(e.get("years_of_experience", ""))
-            if field_type == "native" and opts:
-                for opt in opts:
-                    if yrs in opt:
-                        chosen = opt
+# ── Core form filler ───────────────────────────────────────────────────────────
+
+async def _fill_form_with_answers(
+    page,
+    questions: list,
+    answers: dict,
+    profile: dict,
+) -> None:
+    """
+    Fill the new Greenhouse React UI using pre-computed answers from map_answers().
+
+    answers keys match the API field names (e.g. 'first_name', 'question_17835864004').
+    For dropdown fields the answer value is the option value ID; we reverse-look it up
+    to get the human label and interact with the React Select.
+    """
+    resume_path = profile.get("resume_path", "")
+
+    # Build a map: field_name → {type, values, label_for_chosen}
+    # so we can resolve dropdown value IDs back to human labels
+    field_meta: dict[str, dict] = {}
+    for q in questions:
+        for f in q.get("fields", []):
+            name = f["name"]
+            ftype = f["type"]
+            values = f.get("values", [])
+            ans = answers.get(name)
+            chosen_label = None
+            if values and ans is not None:
+                for v in values:
+                    if str(v["value"]) == str(ans):
+                        chosen_label = v["label"]
                         break
-            else:
-                chosen = yrs
+            field_meta[name] = {
+                "type": ftype,
+                "values": values,
+                "chosen_label": chosen_label,
+            }
 
-        # 4. Ask Claude for unknown custom questions
-        if not chosen and client:
-            try:
-                if field_type == "native" and opts:
-                    prompt = f"""{candidate_context}
+    # Fill text / textarea fields
+    for q in questions:
+        for f in q.get("fields", []):
+            name = f["name"]
+            ftype = f["type"]
+            ans = answers.get(name)
+            if ans is None or ftype == "input_file":
+                continue
 
-Question label: "{field_info.get('label', label)}"
-Available options: {json.dumps(opts)}
-
-Pick the single best option for this candidate. Return ONLY the exact option text, nothing else."""
-                else:
-                    prompt = f"""{candidate_context}
-
-Form question: "{field_info.get('label', label)}"
-This is a dropdown field. What should the candidate answer? Keep it brief (1-3 words if possible)."""
-
-                msg = client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=50,
-                    messages=[{"role": "user", "content": prompt}],
+            if ftype in ("input_text",):
+                # Skip React Select inputs (they have role=combobox; handled as dropdowns)
+                is_select = await page.evaluate(
+                    f"""() => document.querySelector('input#{name}')?.getAttribute('role') === 'combobox'"""
                 )
-                raw = msg.content[0].text.strip().strip('"').strip("'")
-                if field_type == "native" and opts:
-                    for opt in opts:
-                        if raw.lower() == opt.lower() or raw.lower() in opt.lower():
-                            chosen = opt
-                            break
-                    if not chosen:
-                        chosen = raw
-                else:
-                    chosen = raw
-            except Exception as exc:
-                log(f"  ✗ Claude error for '{label}': {exc}")
-                continue
-
-        if not chosen:
-            log(f"  – skipping '{label}' (no value determined)")
-            continue
-
-        # --- Execute the selection ---
-        if field_type == "native":
-            sel = field_info.get("selector")
-            if not sel:
-                continue
-            try:
-                await page.select_option(sel, label=chosen)
-                log(f"  ✓ native-select '{label}' ← {chosen}")
-                await human_delay(200, 400)
-            except Exception:
+                if is_select:
+                    continue
                 try:
-                    await page.select_option(sel, value=chosen)
-                    log(f"  ✓ native-select-value '{label}' ← {chosen}")
-                except Exception as exc2:
-                    log(f"  ✗ native-select '{label}': {exc2}")
+                    await page.wait_for_selector(f"#{name}", timeout=1500, state="visible")
+                    await page.fill(f"#{name}", str(ans))
+                    log(f"  ✓ text #{name} ← {str(ans)[:60]}")
+                    await human_delay(100, 200)
+                except Exception:
+                    pass
+
+            elif ftype == "textarea":
+                # The textarea is hidden until the user clicks "Enter manually".
+                # Click the reveal button first if the textarea isn't already visible.
+                reveal_btn_id = name.replace("_", "-")  # cover_letter_text → cover_letter-text
+                try:
+                    btn = await page.query_selector(f"#{reveal_btn_id}")
+                    if btn:
+                        await btn.click()
+                        await human_delay(300, 500)
+                except Exception:
+                    pass
+                # Now fill the textarea (try both ID formats)
+                html_id = name.replace("_", "-")
+                for sel in (f"#{name}", f"#{html_id}"):
+                    try:
+                        el = await page.query_selector(sel)
+                        if el and await el.evaluate("el => el.tagName") == "TEXTAREA":
+                            await page.fill(sel, str(ans))
+                            log(f"  ✓ textarea {sel} ← {str(ans)[:60]}")
+                            await human_delay(100, 200)
+                            break
+                    except Exception:
+                        pass
+
+    # Set phone country code via the React Select with id="country"
+    # Determine which country to search for based on profile dial code
+    dial_code = (profile.get("personal", {}).get("phone_country_code") or profile.get("phone_country_code") or "+1").strip()
+    _DIAL_TO_COUNTRY = {
+        "+1": "United States", "+44": "United Kingdom", "+91": "India",
+        "+61": "Australia", "+49": "Germany", "+33": "France", "+81": "Japan",
+        "+86": "China", "+55": "Brazil", "+52": "Mexico", "+65": "Singapore",
+        "+971": "United Arab Emirates", "+972": "Israel", "+31": "Netherlands",
+        "+46": "Sweden", "+47": "Norway", "+45": "Denmark", "+358": "Finland",
+        "+41": "Switzerland", "+48": "Poland",
+    }
+    country_search = _DIAL_TO_COUNTRY.get(dial_code, "United States")
+    try:
+        inp = await page.query_selector('input#country[role="combobox"]')
+        if inp:
+            await inp.scroll_into_view_if_needed()
+            await human_delay(200, 300)
+            # Click the .select__control (3 levels above the input)
+            coords = await page.evaluate("""() => {
+                const inp = document.querySelector('input#country[role="combobox"]');
+                if (!inp) return null;
+                const ctrl = inp.parentElement?.parentElement?.parentElement;
+                if (!ctrl) return null;
+                const r = ctrl.getBoundingClientRect();
+                return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+            }""")
+            if coords:
+                await page.mouse.click(coords["x"], coords["y"])
+            else:
+                await inp.click()
+            await human_delay(300, 500)
+            await inp.focus()
+            await inp.press("ArrowDown")
+            await human_delay(400, 600)
+            # Type the country name to filter options
+            await inp.type(country_search, delay=50)
+            await human_delay(400, 600)
+            country_search_lower = country_search.lower()
+            matched = await page.evaluate(f"""() => {{
+                const opts = Array.from(document.querySelectorAll('[role="option"]'))
+                                 .filter(o => o.offsetParent !== null);
+                for (const o of opts) {{
+                    if (o.textContent.trim().toLowerCase().includes('{country_search_lower}')) {{
+                        o.click();
+                        return o.textContent.trim();
+                    }}
+                }}
+                return null;
+            }}""")
+            if matched:
+                log(f"  ✓ phone country code ← {matched}")
+            else:
+                log(f"  – phone country code: no match found")
+                await page.keyboard.press("Escape")
         else:
-            # Custom dropdown interaction
-            ok = await _react_select_choose(page, field_info, chosen)
-            if not ok:
-                log(f"  ✗ could not fill custom dropdown '{label}'")
+            log(f"  – phone country code: input#country not found")
+    except Exception as exc:
+        log(f"  – phone country code: {exc}")
+
+    # Upload resume (the file input is visually hidden; use force)
+    if resume_path and Path(resume_path).exists():
+        try:
+            await page.set_input_files("#resume", resume_path)
+            log(f"  ✓ resume uploaded: {Path(resume_path).name}")
+            await human_delay(1000, 2000)
+        except Exception as exc:
+            log(f"  ✗ resume upload: {exc}")
+
+    # Fill dropdown fields (React Select)
+    for q in questions:
+        for f in q.get("fields", []):
+            name = f["name"]
+            ftype = f["type"]
+            if ftype not in ("multi_value_single_select", "multi_value_multi_select",
+                             "single_select", "multi_select"):
+                continue
+            meta = field_meta.get(name, {})
+            chosen_label = meta.get("chosen_label")
+            if not chosen_label:
+                log(f"  – skip dropdown #{name}: no label resolved")
+                continue
+            await _fill_dropdown(page, name, chosen_label)
+
+    # Scroll to reveal any lazy-rendered fields
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
+    await human_delay(600, 900)
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await human_delay(600, 900)
+
+    # EEO section
+    await _fill_eeo(page, profile)
 
 
-async def apply(url: str):
-    _load()
+# ── Main entry points ──────────────────────────────────────────────────────────
+
+async def apply_with_answers(
+    url: str,
+    questions: list,
+    answers: dict,
+    profile: dict,
+) -> None:
+    """
+    Called by greenhouse.py after it has computed answers via the API.
+    Fills and submits the form using Playwright.
+    """
     global DRY_RUN
     DRY_RUN = "--dry-run" in sys.argv
-    log(f"\n[greenhouse] Starting → {url}")
-    pw, browser, _, page = await new_browser()
 
+    log(f"\n[greenhouse_pw] ── Browser fill (pre-computed answers) ──")
+    log(f"[greenhouse_pw] URL: {url}")
+
+    pw, browser, _, page = await new_browser()
     try:
-        await page.goto(url, wait_until="networkidle", timeout=30000)
-        await check_and_solve(page)
+        await page.goto(url, wait_until="domcontentloaded", timeout=35000)
         await human_delay(1500, 2500)
 
-        if "#application_form" in url:
-            await page.evaluate("document.querySelector('#application_form')?.scrollIntoView()")
-            await human_delay(800, 1500)
-
-        log("[greenhouse] Filling standard fields...")
-
-        await fill_text(page, "#first_name, input[name='job_application[first_name]']", P["first_name"], "First Name")
-        await fill_text(page, "#last_name, input[name='job_application[last_name]']", P["last_name"], "Last Name")
-        await fill_text(page, "#email, input[name='job_application[email]']", P["email"], "Email")
-        await fill_text(page, "#phone, input[name='job_application[phone]']", P["phone"], "Phone")
-
-        # Country code select (phone prefix) — Greenhouse uses a native select
-        try:
-            await page.select_option("select#phone_country_code, select[name*='country_code']", value="1")
-            log("  ✓ phone country code ← +1")
-        except Exception:
-            pass
-
-        # Country select
-        addr = P.get("address", {})
-        country = addr.get("country", "United States")
-        try:
-            await page.select_option("select#country, select[name*='country']", label=country)
-            log(f"  ✓ country ← {country}")
-        except Exception:
-            pass
-
-        for sel in ["input[type='file']", "#resume_upload", "input[name='resume']"]:
-            try:
-                await upload_file(page, sel, PROFILE["resume_path"], "Resume")
-                break
-            except Exception:
-                pass
-
-        await fill_text(page, "input[name*='linkedin'], input[placeholder*='LinkedIn']", P.get("linkedin", ""), "LinkedIn")
-        await fill_text(page, "input[name*='github'], input[placeholder*='GitHub']", P.get("github", ""), "GitHub")
-        await fill_text(page, "input[name*='website'], input[placeholder*='website'], input[placeholder*='portfolio']", P.get("portfolio", ""), "Website")
-
-        for sel in ["#cover_letter", "textarea[name*='cover_letter']", "textarea[placeholder*='cover']"]:
-            try:
-                el = await page.query_selector(sel)
-                if el:
-                    cl = generate_cover_letter("the position", "the company", PROFILE, PROFILE.get("cover_letter_tone", "Professional"))
-                    await fill_text(page, sel, cl, "Cover Letter")
-                    break
-            except Exception:
-                pass
-
-        # EEO dropdowns — by standard Greenhouse IDs
-        eeo_map = [
-            ("select#gender",            D.get("gender", "Prefer not to say")),
-            ("select#race",              D.get("ethnicity", "Prefer not to say")),
-            ("select#veteran_status",    D.get("veteran_status", "I don't wish to answer")),
-            ("select#disability_status", D.get("disability_status", "I don't wish to answer")),
-        ]
-        for sel, val in eeo_map:
-            try:
-                await page.wait_for_selector(sel, timeout=1500)
-                await page.select_option(sel, label=val)
-                log(f"  ✓ eeo {sel} ← {val}")
-            except Exception:
-                pass  # field doesn't exist on this form
-
-        # Scroll down to reveal all sections
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight / 2)")
-        await human_delay(800, 1200)
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await human_delay(800, 1200)
-
-        # Fill all remaining custom question dropdowns with Claude
-        log("[greenhouse] Filling custom question dropdowns with Claude...")
-        await _gh_select_all_remaining(page, PROFILE)
+        log(f"[greenhouse_pw] Filling {len(answers)} fields...")
+        await _fill_form_with_answers(page, questions, answers, profile)
 
         await human_delay(500, 1000)
 
-        if not DRY_RUN:
-            await check_and_solve(page)
-            await submit_and_confirm(page, "#submit_app, button[type='submit'], input[type='submit']", "greenhouse", screenshot)
-        else:
+        if DRY_RUN:
             await screenshot(page, "greenhouse_dryrun")
-            log("[greenhouse] 🔍 DRY RUN — form filled but not submitted")
+            log("[greenhouse_pw] 🔍 DRY RUN — form filled, not submitted")
+            return
 
-    except Exception as e:
-        log(f"[greenhouse] ❌ Error: {e}")
+        # Submit
+        submit_sel = "#submit_app, button[type='submit'], input[type='submit']"
+        try:
+            btn = await page.wait_for_selector(submit_sel, timeout=5000, state="visible")
+            await btn.scroll_into_view_if_needed()
+            await human_delay(500, 1000)
+            await btn.click()
+            log("[greenhouse_pw] Clicked submit button")
+        except Exception as exc:
+            log(f"[greenhouse_pw] ✗ Submit button not found: {exc}")
+            await screenshot(page, "greenhouse_submit_error")
+            return
+
+        # Wait for confirmation — Greenhouse may redirect to various URLs
+        confirmed = False
+        try:
+            await page.wait_for_url(
+                lambda u: any(kw in u for kw in ("confirmation", "confirm", "success", "thank")),
+                timeout=25000,
+            )
+            log(f"[greenhouse_pw] ✅ Submitted — redirected to: {page.url}")
+            confirmed = True
+        except Exception:
+            pass
+
+        if not confirmed:
+            # Check for success/thank-you text in DOM
+            post_text = await page.evaluate("() => document.body.innerText.toLowerCase()")
+            success_keywords = ("thank you", "application received", "successfully submitted",
+                                "we've received", "you have applied", "already applied")
+            for kw in success_keywords:
+                if kw in post_text:
+                    log(f"[greenhouse_pw] ✅ Submitted — found '{kw}' in page text")
+                    confirmed = True
+                    break
+
+        if not confirmed:
+            # Check for validation errors (form still showing with errors)
+            validation_errors = await page.evaluate("""() =>
+                Array.from(document.querySelectorAll('[class*="error-message"], [class*="field-error"], [aria-invalid="true"]'))
+                    .map(e => e.textContent.trim()).filter(t => t.length > 1)
+            """)
+            if validation_errors:
+                log(f"[greenhouse_pw] ✗ Validation errors after submit: {validation_errors[:3]}")
+            else:
+                log(f"[greenhouse_pw] ⚠️  Submit clicked — current URL: {page.url}")
+
+        await screenshot(page, "greenhouse_post_submit" if not confirmed else "greenhouse_confirmed")
+
+    except Exception as exc:
+        log(f"[greenhouse_pw] ❌ Error: {exc}")
         await screenshot(page, "greenhouse_error")
         raise
     finally:
         await browser.close()
         await pw.stop()
 
+
+async def apply(url: str) -> None:
+    """
+    Standalone entry point. Fetches questions from the API, computes answers,
+    then fills the browser form.
+    """
+    global DRY_RUN
+    DRY_RUN = "--dry-run" in sys.argv
+
+    from scripts.greenhouse import (
+        parse_greenhouse_url,
+        fetch_job_questions,
+        map_answers,
+    )
+    from utils.cover_letter import generate_cover_letter
+
+    profile = load_profile()
+    board_token, job_id, api_base, _ = parse_greenhouse_url(url)
+
+    if not board_token or not job_id:
+        log("[greenhouse_pw] ❌ Cannot parse URL — giving up")
+        return
+
+    try:
+        job_data = fetch_job_questions(board_token, job_id, api_base)
+        questions = job_data.get("questions", [])
+    except Exception as exc:
+        log(f"[greenhouse_pw] ❌ API fetch failed: {exc} — cannot pre-compute answers")
+        questions = []
+
+    cl_text = ""
+    try:
+        cl_path = profile.get("cover_letter_path", "generate")
+        if not cl_path or cl_path == "generate":
+            cl_text = generate_cover_letter(
+                job_title=job_data.get("title", "the role") if questions else "the role",
+                company=board_token.replace("-", " ").replace("_", " ").title(),
+                profile=profile,
+                tone=profile.get("cover_letter_tone", "Professional"),
+            )
+    except Exception as exc:
+        log(f"[greenhouse_pw] Cover letter failed: {exc}")
+
+    answers = map_answers(questions, profile, cl_text) if questions else {}
+    answers["job_id"] = job_id
+
+    await apply_with_answers(url, questions, answers, profile)
+
+
 if __name__ == "__main__":
-    url = sys.argv[sys.argv.index("--url") + 1] if "--url" in sys.argv else \
-          "https://job-boards.greenhouse.io/scoutmotors/jobs/5128323007"
-    asyncio.run(apply(url))
+    if "--url" in sys.argv:
+        _url = sys.argv[sys.argv.index("--url") + 1]
+    else:
+        _url = "https://job-boards.greenhouse.io/correlationone/jobs/5997984004"
+    asyncio.run(apply(_url))

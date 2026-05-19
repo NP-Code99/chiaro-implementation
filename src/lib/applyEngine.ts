@@ -2,6 +2,7 @@ import { execFile } from 'child_process'
 import path from 'path'
 import type { Job } from '@prisma/client'
 import type { UserProfile } from './userProfile'
+import { browserApply } from './browserApply'
 
 export type ApplicationStatus = 'applied' | 'failed' | 'needs_review'
 
@@ -19,9 +20,13 @@ const ORCHESTRATOR = path.resolve(process.cwd(), 'job-applications/autofill_orch
 const VENV_PYTHON  = path.resolve(process.cwd(), 'applypilot/.venv/bin/python3')
 const PYTHON       = process.env.PYTHON_BIN ?? VENV_PYTHON
 
-function resolveResumePath(profile: UserProfile): string {
+function resolveResumePath(_profile: UserProfile): string {
   if (process.env.APPLY_RESUME_PATH) return process.env.APPLY_RESUME_PATH
   const home = process.env.HOME ?? '/Users/nandanpullakandam'
+  // Check public/uploads first (uploaded via UI), then home directory fallback
+  const uploadedPath = path.join(process.cwd(), 'public', 'uploads', 'resume-nandan-pullakandam.pdf')
+  const fs = require('fs') as typeof import('fs')
+  if (fs.existsSync(uploadedPath)) return uploadedPath
   return path.join(home, 'Nandan_Pullakandam_Resume.pdf')
 }
 
@@ -84,7 +89,7 @@ function applyWithScrapfly(job: Job, profile: UserProfile): Promise<ApplicationR
 
 // ── Main entry ───────────────────────────────────────────────────────────────
 
-export async function applyToJob(job: Job, profile: UserProfile, _applicationId: string): Promise<ApplicationResult> {
+export async function applyToJob(job: Job, profile: UserProfile, applicationId: string): Promise<ApplicationResult> {
   if (!job.applyUrl) {
     return {
       status: 'needs_review',
@@ -92,8 +97,11 @@ export async function applyToJob(job: Job, profile: UserProfile, _applicationId:
     }
   }
 
-  // Universal Scrapfly engine handles every ATS:
-  // Scrapfly bypasses Cloudflare/bot-detection to scrape form fields,
-  // Claude fills them intelligently, stealth Playwright submits via headed browser.
+  // startup.jobs/apply/ pages sit behind Cloudflare — only Steel's cloud browser
+  // with residential proxy + solveCaptcha can reliably clear it.
+  if (job.applyUrl.includes('startup.jobs/apply/')) {
+    return browserApply(job.applyUrl, profile, applicationId)
+  }
+
   return applyWithScrapfly(job, profile)
 }

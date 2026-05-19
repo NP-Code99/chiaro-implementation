@@ -21,33 +21,54 @@ from utils.cover_letter import generate_cover_letter
 from utils.logger import log
 from utils.profile_loader import load_profile
 
-BOARDS_API_US = "https://boards-api.greenhouse.io/v1/boards"
+BOARDS_API_US    = "https://boards-api.greenhouse.io/v1/boards"
+BOARDS_SUBMIT_US = "https://boards.greenhouse.io"
+BOARDS_SUBMIT_EU = "https://boards.eu.greenhouse.io"
 
 DRY_RUN = "--dry-run" in sys.argv
 
 
 # ── URL parsing ───────────────────────────────────────────────────────────────
 
-def parse_greenhouse_url(url: str) -> tuple[str | None, str | None, str]:
+def parse_greenhouse_url(url: str) -> tuple[str | None, str | None, str, bool]:
     """
-    Return (board_token, job_id, api_base).
-    Always uses BOARDS_API_US — eu.greenhouse.io jobs use the same API.
+    Return (board_token, job_id, api_base, is_eu).
+    Always uses BOARDS_API_US for reads — eu.greenhouse.io jobs use the same read API.
+    is_eu flag controls which submit host to use.
     """
     api_base = BOARDS_API_US
+    is_eu    = "eu.greenhouse.io" in url
 
     # Pattern A: direct board URL (US or EU)
     m = re.search(r"greenhouse\.io/([^/?#]+)/jobs/(\d+)", url)
     if m:
-        return m.group(1), m.group(2), api_base
+        return m.group(1), m.group(2), api_base, is_eu
 
     # Pattern B: embedded gh_jid= param
     m = re.search(r"gh_jid=(\d+)", url)
     if m:
         job_id = m.group(1)
         board_token = _extract_board_token_from_page(url, api_base)
-        return board_token, job_id, api_base
+        return board_token, job_id, api_base, is_eu
 
-    return None, None, api_base
+    # Pattern C: large numeric ID in URL path (e.g. cribl.io/job-detail/5990909004/)
+    # Try the hostname as board token, probe API to confirm
+    m = re.search(r"/(\d{9,})", url)
+    if m:
+        job_id = m.group(1)
+        from urllib.parse import urlparse
+        hostname = (urlparse(url).hostname or "").replace("www.", "")
+        candidate = hostname.split(".")[0]
+        if candidate:
+            probe = requests.get(f"{api_base}/{candidate}/jobs/{job_id}", timeout=8)
+            if probe.status_code == 200:
+                log(f"[greenhouse_api] Pattern C matched: token={candidate}, id={job_id}")
+                return candidate, job_id, api_base, is_eu
+        # Fallback: try HTML extraction
+        board_token = _extract_board_token_from_page(url, api_base)
+        return board_token, job_id, api_base, is_eu
+
+    return None, None, api_base, is_eu
 
 
 def _extract_board_token_from_page(url: str, api_base: str) -> str | None:
@@ -138,13 +159,18 @@ def _pick_yes(values: list) -> int | str:
 def _pick_country(values: list, country: str = "United States") -> int | str | None:
     """Find the value ID matching the candidate's country from a country dropdown."""
     country_lower = country.lower()
+    # Pass 1: exact match
     for v in values:
-        label = v.get("label", "").lower()
-        if label == country_lower:
+        if v.get("label", "").lower() == country_lower:
             return v["value"]
-    # Fuzzy: starts-with match
+    # Pass 2: label contains the full country string (handles "United States of America (USA)")
     for v in values:
-        if v.get("label", "").lower().startswith(country_lower[:5]):
+        if country_lower in v.get("label", "").lower():
+            return v["value"]
+    # Pass 3: label starts with a meaningful prefix (≥8 chars to avoid "Unite" matching UAE)
+    prefix = country_lower[:max(8, len(country_lower))]
+    for v in values:
+        if v.get("label", "").lower().startswith(prefix):
             return v["value"]
     return values[0]["value"] if values else None
 
@@ -228,7 +254,9 @@ def map_answers(questions: list, profile: dict, cover_letter_text: str) -> dict:
                 answers[name] = _pick_value(values, state_val) or values[0]["value"]
 
             # ── Country / Location dropdown ───────────────────────────────
-            elif any(k in label for k in ["country", "location", "where are you located", "where do you live", "where are you based"]) and values:
+            # Guard: skip if "country" only appears in context of work auth/sponsorship
+            elif any(k in label for k in ["country", "location", "where are you located", "where do you live", "where are you based"]) and values \
+                    and not any(k in label for k in ["sponsorship", "authorized", "authorization", "right to work"]):
                 raw_country = addr.get("country", "United States")
                 # Strip placeholder text like "[YOUR COUNTRY — e.g. United States]"
                 country = "United States" if raw_country.startswith("[") else raw_country
@@ -275,8 +303,17 @@ def map_answers(questions: list, profile: dict, cover_letter_text: str) -> dict:
                 answers[name] = p.get("github", "")
 
             # ── Portfolio / website ───────────────────────────────────────
-            elif any(k in label for k in ["portfolio", "personal site", "personal website", "website url"]):
-                answers[name] = p.get("portfolio") or p.get("github", "")
+            elif any(k in label for k in ["portfolio", "personal site", "personal website", "website url",
+                                           "website"]) and q_type == "input_text":
+                portfolio = p.get("portfolio", "")
+                portfolio = "" if portfolio.startswith("[") else portfolio
+                answers[name] = portfolio or p.get("github", "")
+
+            # ── Availability / start date (text) ─────────────────────────
+            elif any(k in label for k in ["availability", "when can you start", "when are you available",
+                                           "earliest start", "available to start"]) and q_type != "multi_value_single_select":
+                start = e.get("available_start_date", "immediately")
+                answers[name] = f"I am available to start {start}. I am flexible and can accommodate the team's needs."
 
             # ── Cover letter / additional info ────────────────────────────
             elif any(k in label for k in ["cover letter", "additional information", "tell us", "why are you",
@@ -420,31 +457,54 @@ def submit_application(
     job_id: str,
     answers: dict,
     resume_path: str,
-    api_base: str = BOARDS_API_US,
     cover_letter_path: str | None = None,
+    is_eu: bool = False,
 ) -> dict:
-    """POST the application via multipart/form-data to Greenhouse Job Board API."""
-    url  = f"{api_base}/{board_token}/apps"
-    data = dict(answers)
-    files: dict = {}
+    """POST the application via multipart/form-data to Greenhouse boards submit endpoint.
+
+    Greenhouse expects fields wrapped as job_application[field_name] for text/select fields,
+    and job_application[resume] / job_application[cover_letter] for file uploads.
+    The job_id is sent as a top-level field.
+    """
+    submit_host = BOARDS_SUBMIT_EU if is_eu else BOARDS_SUBMIT_US
+    url = f"{submit_host}/{board_token}/jobs/{job_id}"
 
     if not resume_path or not Path(resume_path).exists():
         return {"status": "error", "message": f"Resume not found: {resume_path}"}
 
-    files["resume"] = ("resume.pdf", open(resume_path, "rb"), "application/pdf")
+    # Wrap all answer fields under job_application[...] — skip job_id (sent top-level)
+    raw = dict(answers)
+    raw.pop("job_id", None)
+    data: dict = {"job_id": job_id}
+    for k, v in raw.items():
+        data[f"job_application[{k}]"] = v
 
+    files: dict = {}
+    files["job_application[resume]"] = (
+        "resume.pdf", open(resume_path, "rb"), "application/pdf"
+    )
     if cover_letter_path and cover_letter_path not in ("generate", ""):
         cl_p = Path(cover_letter_path)
         if cl_p.exists():
-            files["cover_letter"] = ("cover_letter.pdf", open(cover_letter_path, "rb"), "application/pdf")
+            files["job_application[cover_letter]"] = (
+                "cover_letter.pdf", open(cover_letter_path, "rb"), "application/pdf"
+            )
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": f"{submit_host}/{board_token}/jobs/{job_id}",
+        "Accept": "application/json, text/html, */*",
+        "X-Requested-With": "XMLHttpRequest",
+    }
 
     try:
-        resp = requests.post(url, data=data, files=files, timeout=30)
+        resp = requests.post(url, data=data, files=files, headers=headers,
+                             timeout=30, allow_redirects=True)
         if resp.status_code in (200, 201):
-            log(f"[greenhouse_api] ✅ Submitted (HTTP {resp.status_code})")
-            return {"status": "success", "response_code": resp.status_code}
-        log(f"[greenhouse_api] ❌ HTTP {resp.status_code}: {resp.text[:300]}")
-        return {"status": "error", "message": f"HTTP {resp.status_code}: {resp.text[:200]}",
+            log(f"[greenhouse_api] ✅ Submitted (HTTP {resp.status_code}) — {resp.url}")
+            return {"status": "success", "response_code": resp.status_code, "final_url": resp.url}
+        log(f"[greenhouse_api] ❌ HTTP {resp.status_code}: {resp.text[:400]}")
+        return {"status": "error", "message": f"HTTP {resp.status_code}: {resp.text[:300]}",
                 "response_code": resp.status_code}
     except Exception as exc:
         log(f"[greenhouse_api] ❌ Request error: {exc}")
@@ -463,8 +523,8 @@ async def apply(url: str) -> None:
 
     profile = load_profile()
 
-    # 1. Parse URL → board_token, job_id, api_base
-    board_token, job_id, api_base = parse_greenhouse_url(url)
+    # 1. Parse URL → board_token, job_id, api_base, is_eu
+    board_token, job_id, api_base, _ = parse_greenhouse_url(url)
 
     if not board_token:
         log("[greenhouse_api] ❌ Cannot extract board token — falling back to Playwright")
@@ -518,20 +578,9 @@ async def apply(url: str) -> None:
         log("[greenhouse_api] 🔍 DRY RUN — payload ready, not submitting")
         return
 
-    # 6. Submit
-    result = submit_application(
-        board_token=board_token,
-        job_id=job_id,
-        answers=answers,
-        api_base=api_base,
-        resume_path=profile.get("resume_path", ""),
-        cover_letter_path=profile.get("cover_letter_path"),
-    )
-
-    if result["status"] != "success":
-        log(f"[greenhouse_api] API failed ({result['message']}) — falling back to Playwright")
-        from scripts.greenhouse_playwright_backup import apply as pw_apply
-        await pw_apply(url)
+    # 6. Submit via Playwright (uses pre-computed answers to fill the browser form)
+    from scripts.greenhouse_playwright_backup import apply_with_answers
+    await apply_with_answers(url, questions, answers, profile)
 
 
 # ── URL parsing self-tests ────────────────────────────────────────────────────
@@ -568,7 +617,7 @@ def test_url_parsing() -> None:
         },
     ]
     for tc in TEST_CASES:
-        token, job_id, _ = parse_greenhouse_url(tc["url"])
+        token, job_id, _, is_eu = parse_greenhouse_url(tc["url"])
         assert job_id == tc["expect_id"],   f"Job ID mismatch for {tc['label']}: got {job_id}"
         if tc["expect_token"]:
             assert token == tc["expect_token"], f"Token mismatch for {tc['label']}: got {token}"

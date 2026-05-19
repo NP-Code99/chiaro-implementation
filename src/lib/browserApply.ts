@@ -139,13 +139,24 @@ async function fillField(
     await humanDelay()
 
     if (fieldType === 'file' || value === '__RESUME__') {
-      if (!profile.resumeBase64) return
-      const base64 = profile.resumeBase64.includes(',')
-        ? profile.resumeBase64.split(',')[1]
-        : profile.resumeBase64
-      const tmpPath = path.join(os.tmpdir(), `chiaro-resume-${Date.now()}.pdf`)
-      fs.writeFileSync(tmpPath, Buffer.from(base64, 'base64'))
-      tempFiles.push(tmpPath)
+      let tmpPath: string
+      if (profile.resumeBase64) {
+        const base64 = profile.resumeBase64.includes(',')
+          ? profile.resumeBase64.split(',')[1]
+          : profile.resumeBase64
+        tmpPath = path.join(os.tmpdir(), `chiaro-resume-${Date.now()}.pdf`)
+        fs.writeFileSync(tmpPath, Buffer.from(base64, 'base64'))
+        tempFiles.push(tmpPath)
+      } else {
+        // Fall back to filesystem resume (set via APPLY_RESUME_PATH or ~/Nandan_Pullakandam_Resume.pdf)
+        const fsPath = process.env.APPLY_RESUME_PATH
+          ?? path.join(process.env.HOME ?? os.homedir(), 'Nandan_Pullakandam_Resume.pdf')
+        if (!fs.existsSync(fsPath)) {
+          console.warn('[browserApply] No resume available (resumeBase64 empty, filesystem path missing)')
+          return
+        }
+        tmpPath = fsPath
+      }
       // Try specific selector first, then broad fallback for custom upload widgets (e.g. Greenhouse new board)
       const uploaded = await page.setInputFiles(selector, tmpPath, { timeout: 5000 }).then(() => true).catch(() => false)
       if (!uploaded) {
@@ -366,12 +377,10 @@ export async function browserApply(
       .then(a => a?.jobId ?? '')
       .catch(() => '')
 
-    // startup.jobs/apply/ URLs: skip Scrapfly URL resolution — Steel navigates directly
-    // and handles the CF challenge. The ATS form is detected live inside the browser session.
-    const isStartupJobsApply = applyUrl.includes('startup.jobs/apply/')
-    const resolved = isStartupJobsApply
-      ? { url: applyUrl, isExternal: false }
-      : await resolveApplyUrl(applyUrl, jobId)
+    // resolveApplyUrl handles startup.jobs/apply/ URLs by fetching via Scrapfly (ASP+JS render)
+    // to extract the embedded Greenhouse/Lever/etc. URL, then CloakBrowser applies directly
+    // to that ATS URL — no Cloudflare challenge to deal with.
+    const resolved = await resolveApplyUrl(applyUrl, jobId)
     const effectiveUrl = resolved.url
 
     const isNativeWellfound = !resolved.isExternal && applyUrl.includes('wellfound.com')
@@ -507,11 +516,11 @@ export async function browserApply(
 
     let fillMapping: import('./aiFormFill').FilledField[] = []
     if (rawFields.length > 0) {
-      fillMapping = await claudeFormMapping(rawFields, profile, job, resumeText)
-      if (fillMapping.length === 0) {
-        fillMapping = fallbackFormMapping(rawFields, profile)
-        console.log(`[browserApply] Using fallback mapping: ${fillMapping.length} fields mapped`)
-      }
+      const _claudeMapped = await claudeFormMapping(rawFields, profile, job, resumeText)
+      const _fallbackMapped = fallbackFormMapping(rawFields, profile)
+      const _claudeSelectors = new Set(_claudeMapped.map(f => f.selector))
+      fillMapping = [..._fallbackMapped.filter(f => !_claudeSelectors.has(f.selector)), ..._claudeMapped]
+      console.log(`[browserApply] Using merged mapping: ${_claudeMapped.length} Claude + ${_fallbackMapped.filter(f => !_claudeSelectors.has(f.selector)).length} fallback = ${fillMapping.length} total`)
     }
 
     // Check for fields that still need user input (not in mapping + required)
@@ -559,12 +568,12 @@ export async function browserApply(
       }
     }
 
-    // ── STEP 6: Browser launch — Steel (startup.jobs) or CloakBrowser (all others) ──
-    // Steel.dev is a cloud browser with built-in Cloudflare bypass via residential proxy.
-    // CloakBrowser patches Chromium at C++ level for stealth on non-CF sites.
-    const isStartupJobsNative = effectiveUrl.includes('startup.jobs/apply/')
+    // ── STEP 6: Browser launch — CloakBrowser for all sites ──────────────────────
+    // startup.jobs ATS URL is now extracted by Scrapfly before we get here, so
+    // effectiveUrl is a direct Greenhouse/Lever/etc. URL — no CF challenge.
+    const isStartupJobsNative = false  // never true after Scrapfly URL extraction
     const steelApiKey = process.env.STEEL_API_KEY
-    const useSteel = isStartupJobsNative && !!steelApiKey
+    const useSteel = false  // Steel disabled — CloakBrowser + Scrapfly handles everything
 
     let context: import('playwright').BrowserContext
 
@@ -574,6 +583,7 @@ export async function browserApply(
       const session = await steel.sessions.create({
         useProxy: true,      // Steel's built-in residential proxy pool
         solveCaptcha: true,  // auto-solve Cloudflare Turnstile
+        timeout: 600000,     // 10 min — CF bypass alone can take 80s
       })
       console.log('[browserApply] Steel: useProxy=true + solveCaptcha=true')
       steelSessionId = session.id
@@ -696,6 +706,18 @@ export async function browserApply(
 
     const page = await context.newPage()
 
+    // Block Google's gapi.js proxy page from taking over the main frame.
+    // startup.jobs loads gapi.js (Google Sign-In / reCAPTCHA), which creates an
+    // iframe at content.googleapis.com/static/proxy.html. In some Steel sessions
+    // this URL leaks into the main browsing context and navigates the main window
+    // there, leaving a blank white page instead of the job form.
+    if (isStartupJobsNative) {
+      await page.route('**/content.googleapis.com/static/proxy.html**', (route) => {
+        console.log('[browserApply] Blocked Google API proxy navigation in main frame')
+        route.abort('aborted').catch(() => {})
+      })
+    }
+
     // Inject CapSolver token if we solved a Turnstile
     if (capsolvToken) {
       await page.addInitScript((token: string) => {
@@ -713,7 +735,12 @@ export async function browserApply(
     // so EVERY execute() call — at load time AND submit time — returns a CapSolver
     // high-score token instead of Steel's token. exposeFunction bridges the browser
     // context to Node.js where we call the CapSolver API.
-    if (applyUrl.includes('greenhouse.io')) {
+    //
+    // IMPORTANT: Also install for startup.jobs URLs — many startup.jobs/apply/ pages
+    // redirect to Greenhouse. addInitScript persists across navigations in the context,
+    // so it fires on the Greenhouse page even though applyUrl is a startup.jobs URL.
+    // Without this, the startup.jobs→Greenhouse flow submits with Steel's low-score token.
+    if (applyUrl.includes('greenhouse.io') || effectiveUrl.includes('greenhouse.io')) {
       // Expose the CapSolver solver to the browser page context
       await page.exposeFunction(
         '__capsolverEnterpriseExecute',
@@ -745,7 +772,14 @@ export async function browserApply(
             try {
               const token: string = await (window as unknown as Record<string, Function>)
                 .__capsolverEnterpriseExecute(window.location.href, sitekey || GH_FALLBACK_KEY, opts?.action || 'submit')
-              if (token) return token
+              if (token) {
+                // Sync ALL g-recaptcha-response textareas with this token so Steel's
+                // auto-solved low-score token cannot compete with CapSolver's token.
+                document.querySelectorAll('[id^="g-recaptcha-response"]').forEach(el => {
+                  ;(el as HTMLTextAreaElement).value = token
+                })
+                return token
+              }
             } catch {
               // CapSolver failed — fall through to original
             }
@@ -1124,12 +1158,23 @@ export async function browserApply(
     }
 
     // ── B6: Redirected away from apply page ───────────────────────────────────
-    const finalUrlAfterNav = page.url()
+    let finalUrlAfterNav = page.url()
+
+    // Recovery: if a Google API proxy URL hijacked the main frame (gapi.js side effect),
+    // navigate back to the original target URL before checking B6.
+    const GOOGLE_API_PATTERNS = ['content.googleapis.com', 'accounts.google.com/gsi', 'apis.google.com/js']
+    if (isStartupJobsNative && GOOGLE_API_PATTERNS.some(p => finalUrlAfterNav.includes(p))) {
+      console.log(`[browserApply] Google API redirect detected (${finalUrlAfterNav.slice(0, 80)}) — navigating back to startup.jobs`)
+      await page.goto(navigateTo, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+      await page.waitForTimeout(5000)
+      finalUrlAfterNav = page.url()
+    }
+
     const APPLY_PATH_PATTERNS = [
       '/jobs/', '/careers/', '/careers?', '/apply', '/position', '/role',
       '/opening', '/vacancy', '/opportunity', 'greenhouse.io',
       'lever.co', 'workday.com', 'ashbyhq.com', 'wellfound.com',
-      'trakstar.com', 'gh_jid=',
+      'trakstar.com', 'gh_jid=', 'startup.jobs',
     ]
     const isOnApplyPage = APPLY_PATH_PATTERNS.some(p => finalUrlAfterNav.toLowerCase().includes(p))
     if (!isOnApplyPage && finalUrlAfterNav !== navigateTo) {
@@ -1513,27 +1558,34 @@ export async function browserApply(
         await page.waitForTimeout(500)
 
         const externalAtsUrl = await page.evaluate(() => {
+          const ATS_PATTERN = /bamboohr\.com|greenhouse\.io|ashbyhq\.com|lever\.co|workable\.com|icims\.com|taleo\.net|jobvite\.com/i
+          const GOOGLE_PATTERN = /googleapis\.com|accounts\.google\.com|google\.com\/gsi/i
           const inputs = Array.from(document.querySelectorAll('input[readonly]'))
           for (const input of inputs) {
             const val = (input as HTMLInputElement).value ?? ''
-            if (/bamboohr\.com|greenhouse\.io|ashbyhq\.com|lever\.co|workable\.com|icims\.com|taleo\.net|jobvite\.com/i.test(val)) {
-              return val
-            }
+            // Only match if the ATS domain appears in the origin/path, not just in a hash fragment
+            const valNoHash = val.split('#')[0]
+            if (GOOGLE_PATTERN.test(valNoHash)) continue
+            if (ATS_PATTERN.test(valNoHash)) return val
           }
           // Also check iframes as fallback
           const iframes = Array.from(document.querySelectorAll('iframe'))
           for (const f of iframes) {
             const src = (f as HTMLIFrameElement).src || f.getAttribute('src') || ''
-            if (/greenhouse\.io|ashbyhq\.com|lever\.co|workable\.com|icims\.com|taleo\.net|jobvite\.com|bamboohr\.com/i.test(src)) {
-              return src
-            }
+            const srcNoHash = src.split('#')[0]
+            if (GOOGLE_PATTERN.test(srcNoHash)) continue
+            if (ATS_PATTERN.test(srcNoHash)) return src
           }
           return null
         }).catch(() => null)
 
-        const earlyFrame = page.frames().find((f: import('playwright').Frame) =>
-          /greenhouse\.io|ashbyhq\.com|lever\.co|workable\.com|bamboohr\.com/i.test(f.url()) && f.url() !== 'about:blank'
-        )
+        const earlyFrame = page.frames().find((f: import('playwright').Frame) => {
+          const fUrl = f.url()
+          if (fUrl === 'about:blank') return false
+          // Exclude Google API proxy frames — their URL contains ATS domains only in the hash fragment
+          if (/googleapis\.com|google\.com\/gsi|accounts\.google\.com/i.test(fUrl.split('#')[0])) return false
+          return /greenhouse\.io|ashbyhq\.com|lever\.co|workable\.com|bamboohr\.com/i.test(fUrl)
+        })
         const earlyAtsUrl = externalAtsUrl || earlyFrame?.url() || null
         if (earlyAtsUrl && earlyAtsUrl !== page.url()) {
           console.log(`[browserApply] startup.jobs redirect link — navigating to ATS: ${earlyAtsUrl}`)
@@ -1556,12 +1608,12 @@ export async function browserApply(
         rawFields = rawFields.filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler/i.test(f.selector))
         if (rawFields.length > 0) {
           console.log('[browserApply] Raw fields:', JSON.stringify(rawFields.map(f => ({ sel: f.selector, label: f.label, type: f.inputType, tag: f.tagName, req: f.required }))))
-          fillMapping = await claudeFormMapping(rawFields, profile, job, resumeText)
-          if (fillMapping.length === 0) {
-            fillMapping = fallbackFormMapping(rawFields, profile)
-            console.log(`[browserApply] Live recon: ${rawFields.length} fields found, 0 from Claude — fallback mapped ${fillMapping.length}`)
-          } else {
-            console.log(`[browserApply] Live recon: ${rawFields.length} fields found, ${fillMapping.length} mapped`)
+          {
+            const _c = await claudeFormMapping(rawFields, profile, job, resumeText)
+            const _fb = fallbackFormMapping(rawFields, profile)
+            const _cs = new Set(_c.map(f => f.selector))
+            fillMapping = [..._fb.filter(f => !_cs.has(f.selector)), ..._c]
+            console.log(`[browserApply] Live recon: ${rawFields.length} fields found, ${_c.length} Claude + ${_fb.filter(f => !_cs.has(f.selector)).length} fallback = ${fillMapping.length} merged`)
           }
         } else {
           const diagTitle = await page.title().catch(() => '')
@@ -1604,9 +1656,13 @@ export async function browserApply(
             if (atsFields.length > 0) {
               rawFields = atsFields
               console.log('[browserApply] ATS iframe direct nav: fields found:', JSON.stringify(rawFields.map(f => ({ sel: f.selector, label: f.label }))))
-              fillMapping = await claudeFormMapping(rawFields, profile, job, resumeText)
-              if (fillMapping.length === 0) fillMapping = fallbackFormMapping(rawFields, profile)
-              console.log(`[browserApply] ATS iframe: ${rawFields.length} fields, ${fillMapping.length} mapped`)
+              {
+                const _c = await claudeFormMapping(rawFields, profile, job, resumeText)
+                const _fb = fallbackFormMapping(rawFields, profile)
+                const _cs = new Set(_c.map(f => f.selector))
+                fillMapping = [..._fb.filter(f => !_cs.has(f.selector)), ..._c]
+                console.log(`[browserApply] ATS iframe: ${rawFields.length} fields, ${_c.length} Claude + ${_fb.filter(f => !_cs.has(f.selector)).length} fallback = ${fillMapping.length} merged`)
+              }
             }
           }
 
@@ -1633,11 +1689,13 @@ export async function browserApply(
                 if (newFields.length > 0) {
                   rawFields = newFields
                   console.log('[browserApply] Found form after Apply click:', JSON.stringify(rawFields.map(f => ({ sel: f.selector, label: f.label }))))
-                  fillMapping = await claudeFormMapping(rawFields, profile, job, resumeText)
-                  if (fillMapping.length === 0) {
-                    fillMapping = fallbackFormMapping(rawFields, profile)
+                  {
+                    const _c = await claudeFormMapping(rawFields, profile, job, resumeText)
+                    const _fb = fallbackFormMapping(rawFields, profile)
+                    const _cs = new Set(_c.map(f => f.selector))
+                    fillMapping = [..._fb.filter(f => !_cs.has(f.selector)), ..._c]
+                    console.log(`[browserApply] Post-Apply-click: ${rawFields.length} fields, ${_c.length} Claude + ${_fb.filter(f => !_cs.has(f.selector)).length} fallback = ${fillMapping.length} merged`)
                   }
-                  console.log(`[browserApply] Post-Apply-click: ${rawFields.length} fields, ${fillMapping.length} mapped`)
                 }
               }
             }
@@ -2029,7 +2087,44 @@ export async function browserApply(
       if (page.url().includes('greenhouse.io')) {
         console.log('[browserApply] Greenhouse — supplementary React Select + checkbox fill')
         try {
-          // ── 1. Dropdowns (React Select): click control → click option ─────────
+          // ── 1a. Plain-text question_ inputs (LinkedIn, GitHub, URL, salary, etc.) ──
+          // Greenhouse renders some supplementary fields as plain text inputs (not React
+          // Select). These are backed by question_* IDs but have inputType "text". We must
+          // fill them directly with page.fill() before trying the dropdown path.
+          for (const field of rawFields) {
+            const hint = (field.label ?? '').toLowerCase()
+            const sel = field.selector
+            if (!sel.includes('question_') || field.tagName.toUpperCase() !== 'INPUT') continue
+            if (field.inputType === 'checkbox' || field.inputType === 'radio') continue
+            // Only handle plain text / URL / number inputs (not React Select hidden inputs)
+            if (field.inputType !== 'text' && field.inputType !== 'url' && field.inputType !== 'number' && field.inputType !== null) continue
+            // Skip if this is a React-Select-backed hidden input (its visible sibling will be a styled div)
+            const isReactSelectBacked = await page.evaluate((id: string) => {
+              const el = document.getElementById(id)
+              if (!el) return false
+              const parent = el.parentElement
+              return !!(parent?.classList.contains('select__value-container') ||
+                parent?.closest('[class*="select__"]') ||
+                el.getAttribute('readonly') === '' ||
+                el.getAttribute('aria-hidden') === 'true' ||
+                getComputedStyle(el).display === 'none')
+            }, sel.replace(/^#/, '')).catch(() => false)
+            if (isReactSelectBacked) continue
+
+            let directValue = ''
+            if (/linkedin/i.test(hint))                                     directValue = profile.linkedin ?? ''
+            else if (/github/i.test(hint))                                  directValue = profile.github ?? ''
+            else if (/portfolio|personal.*site|website/i.test(hint))       directValue = profile.github ?? ''
+            else if (/salary|compensation|desired.*pay|expected.*pay/i.test(hint)) directValue = profile.desiredSalary ?? ''
+            else if (/city/i.test(hint))                                    directValue = (profile.location ?? '').split(',')[0]?.trim() ?? ''
+            else if (/state|province/i.test(hint))                         directValue = (profile.location ?? '').split(',')[1]?.trim() ?? ''
+
+            if (!directValue) continue
+            await page.fill(sel, directValue, { timeout: 3000 }).catch(() => {})
+            console.log(`[browserApply] GH plain-text question "${hint.slice(0, 40)}" → "${directValue.slice(0, 60)}"`)
+          }
+
+          // ── 1b. Dropdowns (React Select): click control → click option ─────────
           // Map each question_ text input to a target value using its label.
           // Note: field.tagName comes from Cheerio in lowercase ("input"), so compare
           // case-insensitively.
@@ -2154,29 +2249,65 @@ export async function browserApply(
           }
 
           // ── 2. Country dropdown (React Select) ────────────────────────────────
-          // The #country field on Greenhouse new board is a React Select. Fill it
-          // like the question_* dropdowns: click the container div then pick option.
+          // The #country field on Greenhouse new board is a React Select hidden input.
+          // Traverse up the DOM from #country to find the .select__control ancestor,
+          // then click that to open the dropdown — avoids accidentally clicking the
+          // phone intl-tel-input country flag (which also appears near the Country label).
           const countryField = rawFields.find(f => f.selector === '#country')
           if (countryField) {
             await page.keyboard.press('Escape').catch(() => {})
             await page.waitForTimeout(150)
-            const countryContainer = page.locator('label[for="country"] + div')
-            const countryOpened = await countryContainer.click({ timeout: 2000 }).then(() => true).catch(() => false)
+
+            // Click the React Select control by walking up from #country input
+            const countryOpened = await page.evaluate(() => {
+              const input = document.getElementById('country')
+              if (!input) return false
+              let el: Element | null = input
+              while (el) {
+                const cls = el.className?.toString() ?? ''
+                if (cls.includes('select__control') || cls.includes('select__container')) {
+                  ;(el as HTMLElement).click()
+                  return true
+                }
+                el = el.parentElement
+              }
+              return false
+            }).catch(() => false)
+
             if (countryOpened) {
-              await page.waitForTimeout(600)
-              const countryListbox = page.locator('[role="listbox"]:not([class*="iti"]):not([class*="country-list"]), [class*="select__menu"]').first()
-              if (await countryListbox.isVisible({ timeout: 2000 }).catch(() => false)) {
-                const opts = await countryListbox.locator('[role="option"], li').all()
+              await page.waitForTimeout(800)
+              // Scope to the React Select menu, NOT intl-tel-input country lists
+              const countryListbox = page.locator('[class*="select__menu"], [class*="select__option"]').first()
+              const menuVisible = await countryListbox.isVisible({ timeout: 2000 }).catch(() => false)
+              if (menuVisible) {
+                const opts = await page.locator('[class*="select__option"]').all()
+                let found = false
                 for (const opt of opts) {
                   const text = (await opt.textContent().catch(() => '')).trim()
-                  if (/united states/i.test(text)) {
+                  if (/^united states$/i.test(text) || text === 'United States') {
                     await opt.click().catch(() => {})
                     console.log(`[browserApply] GH country → "${text}"`)
+                    found = true
                     break
+                  }
+                }
+                if (!found) {
+                  // Fallback: type to filter then pick first match
+                  const countryInput = page.locator('[class*="select__input"] input').first()
+                  await countryInput.type('United States', { delay: 50 }).catch(() => {})
+                  await page.waitForTimeout(600)
+                  const filtered = page.locator('[class*="select__option"]').first()
+                  const filteredVisible = await filtered.isVisible({ timeout: 1000 }).catch(() => false)
+                  if (filteredVisible) {
+                    const filteredText = (await filtered.textContent().catch(() => '')).trim()
+                    await filtered.click().catch(() => {})
+                    console.log(`[browserApply] GH country (typed) → "${filteredText}"`)
                   }
                 }
               }
               await page.keyboard.press('Escape').catch(() => {})
+            } else {
+              console.log('[browserApply] GH country: could not find select__control to click')
             }
           }
 
@@ -2576,6 +2707,8 @@ export async function browserApply(
           postSubmitUrl = await takeScreenshot(page, `submitted-${applicationId}`)
         }
 
+        console.log(`[browserApply] Post-submit page text (first 400): ${finalText.slice(0, 400).replace(/\s+/g, ' ')}`)
+
         await prisma.application.update({
           where: { id: applicationId },
           data: { bypassMethod },
@@ -2692,11 +2825,13 @@ export async function browserApply(
       const newPageHtml = await page.content()
       const newFields = extractFieldsFromHtml(newPageHtml)
       if (newFields.length > 0) {
-        let newMapping = await claudeFormMapping(newFields, profile, job, resumeText)
-        if (newMapping.length === 0) {
-          newMapping = fallbackFormMapping(newFields, profile)
+        {
+          const _c = await claudeFormMapping(newFields, profile, job, resumeText)
+          const _fb = fallbackFormMapping(newFields, profile)
+          const _cs = new Set(_c.map(f => f.selector))
+          const newMapping = [..._fb.filter(f => !_cs.has(f.selector)), ..._c]
+          fillMapping.push(...newMapping)
         }
-        fillMapping.push(...newMapping)
       }
     }
 

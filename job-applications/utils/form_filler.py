@@ -245,9 +245,13 @@ async def check_submission_confirmed(page) -> bool:
 async def submit_and_confirm(page, selector: str, ats: str, screenshot_fn=None) -> None:
     """
     Click the submit button then verify a confirmation page appears.
-    Raises RuntimeError if the button isn't found OR if no confirmation is detected.
+    Raises RuntimeError only if the submit button was not found.
+    If the button was clicked but no confirmation is detected, prints the
+    MANUAL REVIEW REQUIRED sentinel (so the TS caller marks it needs_review)
+    and exits 0 — the application may have submitted but the ATS did not show
+    a detectable confirmation page.
     """
-    import asyncio
+    import asyncio, sys
     clicked = await click_button(page, selector, "Submit")
     if not clicked:
         raise RuntimeError("Submit button not found — could not submit application")
@@ -265,7 +269,7 @@ async def submit_and_confirm(page, selector: str, ats: str, screenshot_fn=None) 
         await screenshot_fn(page, f"{ats}_confirmation")
 
     if not confirmed:
-        raise RuntimeError(
-            "Submit clicked but no confirmation found — application status unknown"
-        )
+        log(f"[{ats}] ⚠ Submit clicked but confirmation page not detected — flagging for manual review")
+        print("MANUAL REVIEW REQUIRED: Submit clicked but confirmation page not detected", flush=True)
+        sys.exit(0)
     log(f"[{ats}] ✅ Submission confirmed")

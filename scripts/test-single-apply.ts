@@ -8,24 +8,35 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env.local') })
 
 import { nanoid } from 'nanoid'
 
-const TEST_URL = 'https://startup.jobs/apply/74f8158e-5a95-4ff1-be84-1fb13d3c010d'
+const TEST_URL = 'https://startup.jobs/apply/060b1813-29ab-433a-9cd7-711646841fd7'
+
+import * as fs from 'fs'
+const resumePath = '/Users/nandanpullakandam/Nandan_Pullakandam_Resume.pdf'
+const resumeBase64 = fs.existsSync(resumePath)
+  ? fs.readFileSync(resumePath).toString('base64')
+  : ''
 
 const profile = {
   firstName: 'Nandan',
   lastName: 'Pullakandam',
   email: 'nandan.pullakandam12@gmail.com',
-  phone: '17046251688',
-  linkedin: 'www.linkedin.com/in/nandan-pullakandam',
-  github: '',
+  phone: '7046251688',
+  phoneCountryCode: '+1',
+  linkedin: 'https://www.linkedin.com/in/nandan-pullakandam',
+  github: 'https://github.com/NP-Code99',
   location: 'Charlotte, NC',
   workAuth: 'US Citizen' as const,
   yearsExp: '1-3' as const,
   desiredSalary: '100000',
-  resumeBase64: '',
-  resumeFilename: '',
-  bio: "Hello, I'm Nandan. Applying to jobs",
+  resumeBase64,
+  resumeFilename: 'Nandan_Pullakandam_Resume.pdf',
+  bio: "Software engineer with experience in TypeScript, Python, React, Next.js, and Node.js. Strong background in building full-stack applications and automation systems.",
   applicationPassword: 'Chiaro10346488!',
   wellfoundCookies: '',
+  gender: 'Male' as const,
+  ethnicity: 'Asian' as const,
+  veteranStatus: 'I am not a protected veteran' as const,
+  disabilityStatus: 'No, I do not have a disability' as const,
 }
 
 async function main() {

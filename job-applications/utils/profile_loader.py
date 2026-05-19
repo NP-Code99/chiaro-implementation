@@ -155,6 +155,12 @@ def load_profile() -> dict:
         filename = ts_profile.get("resumeFilename", "resume.pdf")
         resume_path = _save_resume_from_b64(resume_b64, filename)
 
+    # Phone country code
+    phone_country_code = (
+        ts_profile.get("phoneCountryCode")
+        or yaml_personal.get("phone_country_code", "+1")
+    )
+
     # Assemble final profile dict matching profile.yaml structure
     profile = {
         "personal": {
@@ -162,6 +168,7 @@ def load_profile() -> dict:
             "last_name":  last_name,
             "email":      email,
             "phone":      phone,
+            "phone_country_code": phone_country_code,
             "linkedin":   linkedin,
             "github":     github,
             "portfolio":  yaml_personal.get("portfolio", ""),

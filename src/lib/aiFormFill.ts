@@ -1,8 +1,8 @@
-import OpenAI from 'openai'
+import Anthropic from '@anthropic-ai/sdk'
 import type { UserProfile } from './userProfile'
 import type { FieldDescriptor } from './browserApply'
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 /**
  * Generates a natural, specific answer to a single job application field
@@ -40,12 +40,13 @@ Write a concise, genuine, specific answer to this question as if you are the can
 Return ONLY the answer text, nothing else.`
 
   try {
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     })
-    return response.choices[0]?.message?.content?.trim() ?? ''
+    const block = response.content[0]
+    return block?.type === 'text' ? block.text.trim() : ''
   } catch {
     return ''
   }
@@ -68,16 +69,31 @@ export async function claudeFormMapping(
   job: { role: string; company: string; description: string; location: string },
   resumeText: string,
 ): Promise<FilledField[]> {
+  // Parse city and state from the combined location string ("Charlotte, NC")
+  const locationParts = (profile.location ?? '').split(',').map(s => s.trim())
+  const profileCity = locationParts[0] ?? ''
+  const profileState = locationParts[1] ?? ''
+
   const profileSummary = JSON.stringify({
     firstName: profile.firstName,
     lastName: profile.lastName,
     email: profile.email,
     phone: profile.phone,
-    location: profile.location,
+    address_city: profileCity,
+    address_state: profileState,
+    address_street: '',
+    address_zip: '',
+    address_country: 'United States',
     linkedin: profile.linkedin,
     github: profile.github,
     yearsExp: profile.yearsExp,
+    desiredSalary: profile.desiredSalary ?? '',
     workAuth: profile.workAuth,
+    requiresSponsorship: false,
+    gender: profile.gender ?? '',
+    ethnicity: profile.ethnicity ?? '',
+    veteranStatus: profile.veteranStatus ?? '',
+    disabilityStatus: profile.disabilityStatus ?? '',
     bio: profile.bio ?? '',
   }, null, 2)
 
@@ -111,8 +127,13 @@ INSTRUCTIONS:
 - For work authorization: authorized=Yes, sponsorship=No unless profile says otherwise
 - For "How did you find us" checkboxes: use value "Other"
 - For password fields: use value "Chiaro2024!"
-- For salary: give a realistic range for the role and location
+- For salary: use profile desiredSalary if set, otherwise give a realistic range for the role and location
 - For file upload (resume): use value "__RESUME__"
+- NEVER invent or hallucinate data. Only fill a field if the value is present in the profile above.
+- If a profile field is empty string, skip that field — do not guess or make up a value.
+- City field: use address_city from profile only. State: use address_state. Street: only if address_street is non-empty. Zip: only if address_zip is non-empty.
+- EEO / demographic fields (gender, race, ethnicity, veteran status, disability): use the exact values from the profile's gender/ethnicity/veteranStatus/disabilityStatus fields. If empty, use "Prefer not to say" / "I don't wish to answer" / "Decline to self-identify".
+- currentTitle: use profile currentTitle. currentCompany: use profile currentCompany. Education: use profile education.
 - Skip fields you cannot fill with confidence
 
 Return ONLY a valid JSON array, no markdown, no explanation:
@@ -123,14 +144,17 @@ Return ONLY a valid JSON array, no markdown, no explanation:
 Only include fields with confidence above 0.7.`
 
   try {
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 2000,
       messages: [{ role: 'user', content: prompt }],
     })
 
-    const text = response.choices[0]?.message?.content?.trim() ?? '[]'
-    const parsed = JSON.parse(text) as FilledField[]
+    const block = response.content[0]
+    const text = block?.type === 'text' ? block.text.trim() : '[]'
+    // Strip markdown code fences if present
+    const json = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+    const parsed = JSON.parse(json) as FilledField[]
     return parsed.filter(f => f.confidence > 0.7)
   } catch (err) {
     console.warn('[claudeFormMapping] Failed:', err instanceof Error ? err.message : String(err))
@@ -219,15 +243,18 @@ export function fallbackFormMapping(
       } else if (/country/i.test(hint)) {
         value = pickOption(opts, ['united states', 'us', 'usa', 'america']) ?? 'United States'
       } else if (/state|province/i.test(hint)) {
-        value = pickOption(opts, ['california', 'ca']) ?? 'CA'
+        const st = ((profile.location ?? '').split(',')[1]?.trim() ?? '').toLowerCase()
+        value = st ? (pickOption(opts, [st]) ?? '') : ''
       } else if (/gender|pronoun/i.test(hint)) {
-        value = pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? ''
+        const g = (profile.gender ?? '').toLowerCase()
+        value = g ? (pickOption(opts, [g]) ?? pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? '') : (pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? '')
       } else if (/race|ethnic/i.test(hint)) {
-        value = pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? ''
+        const e = (profile.ethnicity ?? '').toLowerCase()
+        value = e ? (pickOption(opts, [e, 'asian']) ?? pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? '') : (pickOption(opts, ['decline', 'prefer not', 'no answer', 'other']) ?? '')
       } else if (/veteran|military/i.test(hint)) {
-        value = pickOption(opts, ['not a veteran', 'no', 'decline', 'i am not']) ?? ''
+        value = pickOption(opts, ['not a protected veteran', 'i am not', 'not a veteran', 'no', 'decline']) ?? ''
       } else if (/disabilit/i.test(hint)) {
-        value = pickOption(opts, ['no', 'not disabled', 'decline', 'do not']) ?? ''
+        value = pickOption(opts, ['no, i do not have', 'no disability', 'not disabled', 'no', 'decline', 'do not']) ?? ''
       } else if (/how.*hear|source|referral/i.test(hint)) {
         value = pickOption(opts, ['other', 'internet', 'online', 'job board']) ?? ''
       }
@@ -251,18 +278,19 @@ export function fallbackFormMapping(
     else if (/phone|mobile|telephone|\btel\b|cell/i.test(hint))    value = profile.phone
     else if (/linkedin/i.test(hint))                               value = profile.linkedin ?? ''
     else if (/github/i.test(hint))                                 value = profile.github ?? ''
-    else if (/portfolio|personal.*site|website/i.test(hint))       value = 'https://alexrivera.dev'
-    else if (/\bcity\b/i.test(hint))                               value = 'San Francisco'
-    else if (/\bstate\b|\bprovince\b/i.test(hint))                 value = 'CA'
-    else if (/zip|postal/i.test(hint))                             value = '94105'
+    else if (/portfolio|personal.*site|website/i.test(hint))       value = profile.github ?? ''
+    else if (/\bcity\b/i.test(hint))                               value = (profile.location ?? '').split(',')[0]?.trim() ?? ''
+    else if (/\bstate\b|\bprovince\b/i.test(hint))                 value = (profile.location ?? '').split(',')[1]?.trim() ?? ''
+    else if (/zip|postal/i.test(hint))                             value = ''
     else if (/country/i.test(hint))                                value = 'United States'
-    else if (/location|address/i.test(hint))                       value = profile.location
+    else if (/street|address.*line|address.*1/i.test(hint))        value = ''
+    else if (/location|address/i.test(hint))                       value = profile.location ?? ''
     else if (/salary|compensation|\bpay\b|desired.*pay|expected.*pay/i.test(hint)) value = profile.desiredSalary
     else if (/year.*exp|experience.*year|how.*long.*experience/i.test(hint)) value = profile.yearsExp
-    else if (/current.*title|job.*title|position.*title/i.test(hint)) value = 'Software Engineer'
-    else if (/current.*company|employer|organization/i.test(hint)) value = 'TechCorp Inc.'
-    else if (/degree|education|major|school|university|college/i.test(hint)) value = 'B.S. Computer Science, UC Berkeley'
-    else if (/skill|technolog|language|stack/i.test(hint))         value = 'TypeScript, React, Node.js, PostgreSQL, AWS'
+    else if (/current.*title|job.*title|position.*title/i.test(hint)) value = ''
+    else if (/current.*company|employer|organization/i.test(hint)) value = ''
+    else if (/degree|education|major|school|university|college/i.test(hint)) value = ''
+    else if (/skill|technolog|language|stack/i.test(hint))         value = ''
     else if (/sponsor|visa|h1b/i.test(hint))                       value = 'No'
     else if (/authoriz|eligible|work.*permit|legal.*work/i.test(hint)) value = 'Yes'
     else if (/how.*hear|source|referral|where.*find/i.test(hint))  value = 'Other'
@@ -306,12 +334,13 @@ export async function generateSalaryAnswer(
   const prompt = `What is a reasonable salary expectation for a ${role} in ${location} with ${yearsExp} years of experience? Return ONLY the number or range, e.g. "$130,000" or "$120,000 - $150,000". Nothing else.`
 
   try {
-    const response = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
+    const response = await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 30,
       messages: [{ role: 'user', content: prompt }],
     })
-    return response.choices[0]?.message?.content?.trim() ?? ''
+    const block = response.content[0]
+    return block?.type === 'text' ? block.text.trim() : ''
   } catch {
     return ''
   }

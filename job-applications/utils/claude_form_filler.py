@@ -213,6 +213,9 @@ Rules:
 - For selects, value must exactly match one of the listed options
 - For yes/no questions about work authorization: authorized=Yes, sponsorship=No (unless profile says otherwise)
 - For demographic/EEO fields (gender, race, veteran, disability): use "Prefer not to say" / "I don't wish to answer" unless profile specifies
+- NEVER invent or hallucinate data. Only fill a field if the exact value is present in the profile.
+- If the profile has an empty string or missing value for a field (e.g. street address, zip code), SKIP that field entirely — do not guess or make up a plausible-sounding value.
+- City field: use profile city only. State field: use profile state only. Street address: only fill if profile street is non-empty. Zip: only fill if profile zip is non-empty.
 - Skip fields where the answer is genuinely unknown and the field is optional
 - For cover letter textareas: generate a brief, professional 2-3 sentence cover letter using profile data
 - Include a submit button click as the LAST action only if the caller requests it
@@ -236,6 +239,7 @@ async def ask_claude_fill_plan(
     e = profile.get("employment", {})
     wa = profile.get("work_authorization", {})
 
+    addr = p.get("address", {})
     profile_summary = {
         "first_name":   p.get("first_name", ""),
         "last_name":    p.get("last_name", ""),
@@ -243,7 +247,12 @@ async def ask_claude_fill_plan(
         "phone":        p.get("phone", ""),
         "linkedin":     p.get("linkedin", ""),
         "portfolio":    p.get("portfolio", ""),
-        "location":     f"{p.get('city', '')}, {p.get('state', '')}",
+        # Address fields — empty string means DO NOT fill that field
+        "address_street":  addr.get("street", "") or p.get("street", ""),
+        "address_city":    addr.get("city", "") or p.get("city", ""),
+        "address_state":   addr.get("state", "") or p.get("state", ""),
+        "address_zip":     addr.get("zip", "") or p.get("zip", ""),
+        "address_country": addr.get("country", "") or p.get("country", "United States"),
         "current_title": e.get("current_title", ""),
         "current_company": e.get("current_company", ""),
         "years_experience": e.get("years_experience", ""),
@@ -530,4 +539,6 @@ async def claude_fill_form(
         log("[claude-filler] ✅ Submission confirmed by page (delayed)")
         return True
 
-    raise RuntimeError("Submit clicked but no confirmation found on page — application status unknown")
+    log("[claude-filler] ⚠ Submit clicked but confirmation page not detected — flagging for manual review")
+    print("MANUAL REVIEW REQUIRED: Submit clicked but confirmation page not detected", flush=True)
+    import sys; sys.exit(0)
