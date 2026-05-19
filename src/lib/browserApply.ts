@@ -1613,19 +1613,37 @@ export async function browserApply(
         // Strip cookie-consent fields (OneTrust) — they are never job-application inputs
         rawFields = rawFields.filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler/i.test(f.selector))
         // BambooHR listing page detection — "Link to This Job" is the only field on the
-        // listing; the actual form lives at [url]/apply (no trailing slash).
+        // listing page. Click the Apply button to open the real application form.
         const isBambooHrListing = page.url().includes('bamboohr.com') &&
           rawFields.length <= 2 &&
           rawFields.some(f => /link to this job/i.test(f.label ?? ''))
         if (isBambooHrListing) {
-          const applyFormUrl = page.url().replace(/\/apply\/?$/, '').replace(/\?.*$/, '') + '/apply'
-          console.log(`[browserApply] BambooHR listing detected — navigating to form: ${applyFormUrl}`)
-          await page.goto(applyFormUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
-          await page.waitForSelector('input[type="text"], input[type="email"], textarea, input[name]', { timeout: 10000 }).catch(() => {})
-          await page.waitForTimeout(1500)
+          console.log('[browserApply] BambooHR listing detected — clicking Apply button')
+          const bambooApplyBtn = page.locator(
+            'a:has-text("Apply"), button:has-text("Apply"), ' +
+            'a:has-text("Apply Now"), button:has-text("Apply Now"), ' +
+            '[data-testid*="apply"], [class*="apply-btn"], [class*="ApplyButton"]'
+          ).first()
+          const bambooApplyVisible = await bambooApplyBtn.isVisible({ timeout: 5000 }).catch(() => false)
+          if (bambooApplyVisible) {
+            await bambooApplyBtn.click().catch(() => {})
+            await page.waitForTimeout(2000)
+            // BambooHR may navigate to /apply or open a modal — wait for any input to appear
+            await page.waitForSelector(
+              'input, textarea, select, [role="textbox"], [data-automation-id]',
+              { timeout: 15000 }
+            ).catch(() => {})
+            await page.waitForTimeout(2000)
+          } else {
+            // Fallback: navigate directly to /apply
+            const applyFormUrl = page.url().replace(/\/apply\/?$/, '').replace(/\?.*$/, '') + '/apply'
+            console.log(`[browserApply] BambooHR Apply button not found — navigating directly: ${applyFormUrl}`)
+            await page.goto(applyFormUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
+            await page.waitForTimeout(3000)
+          }
           const bambooHtml = await page.content().catch(() => '')
           rawFields = extractFieldsFromHtml(bambooHtml)
-            .filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler/i.test(f.selector))
+            .filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler|link to this job/i.test(f.label ?? f.selector))
           console.log('[browserApply] BambooHR form fields:', JSON.stringify(rawFields.map(f => ({ sel: f.selector, label: f.label, type: f.inputType, tag: f.tagName, req: f.required }))))
         }
 
@@ -2894,21 +2912,27 @@ export async function browserApply(
           }
         }
 
-        // Lever: on success shows "Application submitted" page or redirects to a confirmation URL.
-        // BambooHR: on success redirects to /careers/[id]/apply?source=... with a thank-you message,
-        // or the form fields are cleared. Detect by URL domain + no validation error visible.
+        // ATS-specific success detection (all use Steel or CloakBrowser generic path).
+        // These ATSes don't show a standard "Thank you" page that SUCCESS_PATTERNS can match.
         const VALIDATION_ERROR_PATTERNS = [/please fill in/i, /required field/i, /field is required/i, /this field is required/i, /invalid email/i, /please enter/i, /cannot be blank/i]
         const hasValidationError = VALIDATION_ERROR_PATTERNS.some(p => p.test(finalText))
         const postSubmitPageUrl = page.url()
         if (!hasValidationError) {
+          // Greenhouse: redirects back to the job listing page — no "thank you" URL to match.
+          // Still on greenhouse.io + no validation error = submitted successfully.
+          if (submitTimeDomain.includes('greenhouse.io') || postSubmitPageUrl.includes('greenhouse.io')) {
+            return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
+          }
+          // Lever: redirects away from /apply URL on success, or shows confirmation text.
           if (submitTimeDomain.includes('lever.co') && (
             /application.*submit|thank you for applying|we.ve received/i.test(finalText) ||
             postSubmitPageUrl.includes('/confirmation') ||
             postSubmitPageUrl.includes('/thanks') ||
-            !postSubmitPageUrl.includes('/apply') // redirected away from /apply = success
+            !postSubmitPageUrl.includes('/apply')
           )) {
             return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
           }
+          // BambooHR: redirects to /success or shows confirmation text.
           if (submitTimeDomain.includes('bamboohr.com') && (
             /thank you|application received|successfully submitted|we.ll be in touch/i.test(finalText) ||
             postSubmitPageUrl.includes('/success') ||
