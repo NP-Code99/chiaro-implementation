@@ -115,11 +115,12 @@ async function humanClick(
 
 async function humanScroll(page: import('playwright').Page): Promise<void> {
   await page.evaluate(async () => {
-    const total = Math.min(document.body.scrollHeight, 2000)
-    const steps = 8
+    // Use full page height — no cap; Greenhouse forms with disability sections can exceed 4000px
+    const total = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
+    const steps = 12
     for (let i = 1; i <= steps; i++) {
       window.scrollTo(0, (total / steps) * i)
-      await new Promise(r => setTimeout(r, 200 + Math.random() * 200))
+      await new Promise(r => setTimeout(r, 150 + Math.random() * 150))
     }
     // Stay at bottom — submit button is there; do not reset to top
   })
@@ -1990,6 +1991,13 @@ export async function browserApply(
           bypassMethod,
         }
       }
+
+      // Force scroll to bottom so the submit button is reachable regardless of page height
+      await page.evaluate(() => {
+        const h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
+        window.scrollTo(0, h)
+      })
+      await page.waitForTimeout(600)
 
       // Find the submit button — Greenhouse uses #submit_app specifically.
       // page.evaluate only accepts native CSS selectors; Playwright :has-text is used separately.
