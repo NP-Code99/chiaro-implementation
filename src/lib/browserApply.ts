@@ -2681,14 +2681,22 @@ export async function browserApply(
           // reset form values (e.g. on Trakstar), so we fill again right before submit.
           // Use page.fill() for text/textarea to REPLACE (not append like page.type() does).
           console.log('[browserApply] Re-filling fields post-reCAPTCHA solve')
-          for (const field of fillMapping) {
-            const value = userAnswers[field.selector] ?? field.value
-            if (field.fieldType === 'text' || field.fieldType === 'textarea') {
-              await page.fill(field.selector, value, { timeout: 3000 }).catch(() => {})
-            } else {
-              await fillField(page, field.selector, value, field.fieldType, profile, tempFiles).catch(() => {})
-            }
-          }
+          await Promise.race([
+            (async () => {
+              for (const field of fillMapping) {
+                const value = userAnswers[field.selector] ?? field.value
+                if (field.fieldType === 'text' || field.fieldType === 'textarea') {
+                  await page.fill(field.selector, value, { timeout: 3000 }).catch(() => {})
+                } else {
+                  await Promise.race([
+                    fillField(page, field.selector, value, field.fieldType, profile, tempFiles),
+                    new Promise<void>(r => setTimeout(r, 4000)),
+                  ]).catch(() => {})
+                }
+              }
+            })(),
+            new Promise<void>(r => setTimeout(r, 30_000)), // never block more than 30s total on re-fill
+          ])
 
           // On Greenhouse, re-check checkboxes that reCAPTCHA solving may have reset
           if (page.url().includes('greenhouse.io')) {
@@ -2943,7 +2951,7 @@ export async function browserApply(
       run(),
       new Promise<BrowserApplyResult>(resolve =>
         setTimeout(
-          () => resolve({ status: 'needs_review', errorMessage: 'Timed out after 5 minutes', applyUrl }),
+          () => resolve({ status: 'needs_review', errorMessage: 'Timed out after 10 minutes', applyUrl }),
           TOTAL_TIMEOUT_MS,
         )
       ),
