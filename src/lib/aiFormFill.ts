@@ -152,8 +152,10 @@ Only include fields with confidence above 0.7.`
 
     const block = response.content[0]
     const text = block?.type === 'text' ? block.text.trim() : '[]'
-    // Strip markdown code fences if present
-    const json = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+    // Strip markdown code fences, then extract the first JSON array in the response
+    const stripped = text.replace(/^```(?:json)?\n?/i, '').replace(/\n?```$/i, '').trim()
+    const arrayMatch = stripped.match(/\[[\s\S]*\]/)
+    const json = arrayMatch ? arrayMatch[0] : '[]'
     const parsed = JSON.parse(json) as FilledField[]
     return parsed.filter(f => f.confidence > 0.7)
   } catch (err) {

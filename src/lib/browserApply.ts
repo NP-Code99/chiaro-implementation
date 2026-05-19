@@ -1612,6 +1612,23 @@ export async function browserApply(
         rawFields = extractFieldsFromHtml(liveHtml)
         // Strip cookie-consent fields (OneTrust) — they are never job-application inputs
         rawFields = rawFields.filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler/i.test(f.selector))
+        // BambooHR listing page detection — "Link to This Job" is the only field on the
+        // listing; the actual form lives at [url]/apply (no trailing slash).
+        const isBambooHrListing = page.url().includes('bamboohr.com') &&
+          rawFields.length <= 2 &&
+          rawFields.some(f => /link to this job/i.test(f.label ?? ''))
+        if (isBambooHrListing) {
+          const applyFormUrl = page.url().replace(/\/apply\/?$/, '').replace(/\?.*$/, '') + '/apply'
+          console.log(`[browserApply] BambooHR listing detected — navigating to form: ${applyFormUrl}`)
+          await page.goto(applyFormUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+          await page.waitForSelector('input[type="text"], input[type="email"], textarea, input[name]', { timeout: 10000 }).catch(() => {})
+          await page.waitForTimeout(1500)
+          const bambooHtml = await page.content().catch(() => '')
+          rawFields = extractFieldsFromHtml(bambooHtml)
+            .filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler/i.test(f.selector))
+          console.log('[browserApply] BambooHR form fields:', JSON.stringify(rawFields.map(f => ({ sel: f.selector, label: f.label, type: f.inputType, tag: f.tagName, req: f.required }))))
+        }
+
         if (rawFields.length > 0) {
           console.log('[browserApply] Raw fields:', JSON.stringify(rawFields.map(f => ({ sel: f.selector, label: f.label, type: f.inputType, tag: f.tagName, req: f.required }))))
           {
@@ -2874,6 +2891,30 @@ export async function browserApply(
             screenshotUrl: postSubmitUrl,
             preSubmitScreenshotUrl: preSubmitUrl,
             bypassMethod,
+          }
+        }
+
+        // Lever: on success shows "Application submitted" page or redirects to a confirmation URL.
+        // BambooHR: on success redirects to /careers/[id]/apply?source=... with a thank-you message,
+        // or the form fields are cleared. Detect by URL domain + no validation error visible.
+        const VALIDATION_ERROR_PATTERNS = [/please fill in/i, /required field/i, /field is required/i, /this field is required/i, /invalid email/i, /please enter/i, /cannot be blank/i]
+        const hasValidationError = VALIDATION_ERROR_PATTERNS.some(p => p.test(finalText))
+        const postSubmitPageUrl = page.url()
+        if (!hasValidationError) {
+          if (submitTimeDomain.includes('lever.co') && (
+            /application.*submit|thank you for applying|we.ve received/i.test(finalText) ||
+            postSubmitPageUrl.includes('/confirmation') ||
+            postSubmitPageUrl.includes('/thanks') ||
+            !postSubmitPageUrl.includes('/apply') // redirected away from /apply = success
+          )) {
+            return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
+          }
+          if (submitTimeDomain.includes('bamboohr.com') && (
+            /thank you|application received|successfully submitted|we.ll be in touch/i.test(finalText) ||
+            postSubmitPageUrl.includes('/success') ||
+            postSubmitPageUrl.includes('confirmationToken')
+          )) {
+            return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
           }
         }
 
