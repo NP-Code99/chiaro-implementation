@@ -1081,6 +1081,21 @@ export async function browserApply(
     // the DataDome handler runs, making the captcha permanently unresolvable.
     // DO NOT remove this DataDome check — it is what makes DataDome work.
     if (postNavText.length < 100) {
+      // BambooHR is a React SPA — the initial HTML shell has < 100 chars.
+      // Wait for the app to hydrate before declaring B5.
+      if (page.url().includes('bamboohr.com')) {
+        await page.waitForSelector('body > *:not(script):not(style):not(noscript)', { timeout: 15000 }).catch(() => {})
+        await page.waitForTimeout(3000)
+        const bambooText = (await page.evaluate(() => document.body?.innerText ?? '').catch(() => '')).toLowerCase()
+        if (bambooText.length >= 50) {
+          // BambooHR content loaded — skip B5 and continue
+        } else {
+          const ss = await takeScreenshot(page, `${applicationId}-broken-blank`)
+          await browser?.close().catch(() => {})
+          browser = null
+          return handleBrokenJobPosting(applicationId, 'BambooHR page loaded blank', 'B5', ss)
+        }
+      } else {
       // Give DataDome's captcha request interceptor time to fire (it's async)
       await page.waitForTimeout(5000)
       const refreshedText = (await page.evaluate(() => document.body?.innerText ?? '').catch(() => '')).toLowerCase()
@@ -1161,6 +1176,7 @@ export async function browserApply(
         browser = null
         return handleBrokenJobPosting(applicationId, 'Page loaded blank', 'B5', ss)
       }
+      } // close else (non-BambooHR) block
     }
 
     // ── B6: Redirected away from apply page ───────────────────────────────────
@@ -1627,23 +1643,57 @@ export async function browserApply(
           const bambooApplyVisible = await bambooApplyBtn.isVisible({ timeout: 5000 }).catch(() => false)
           if (bambooApplyVisible) {
             await bambooApplyBtn.click().catch(() => {})
-            await page.waitForTimeout(2000)
-            // BambooHR may navigate to /apply or open a modal — wait for any input to appear
+            await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {})
+            // BambooHR Fabric UI renders inputs asynchronously — wait for React to hydrate
             await page.waitForSelector(
-              'input, textarea, select, [role="textbox"], [data-automation-id]',
-              { timeout: 15000 }
+              'input:not([type="hidden"]), textarea, select',
+              { timeout: 20000 }
             ).catch(() => {})
-            await page.waitForTimeout(2000)
+            await page.waitForTimeout(3000)
           } else {
             // Fallback: navigate directly to /apply
             const applyFormUrl = page.url().replace(/\/apply\/?$/, '').replace(/\?.*$/, '') + '/apply'
             console.log(`[browserApply] BambooHR Apply button not found — navigating directly: ${applyFormUrl}`)
-            await page.goto(applyFormUrl, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {})
-            await page.waitForTimeout(3000)
+            await page.goto(applyFormUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {})
+            await page.waitForSelector(
+              'input:not([type="hidden"]), textarea, select',
+              { timeout: 20000 }
+            ).catch(() => {})
+            await page.waitForTimeout(4000)
           }
-          const bambooHtml = await page.content().catch(() => '')
-          rawFields = extractFieldsFromHtml(bambooHtml)
-            .filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler|link to this job/i.test(f.label ?? f.selector))
+          // BambooHR Fabric UI renders inputs via React — use live DOM query instead of HTML parse
+          const bambooLiveFields = await page.$$eval(
+            'input:not([type="hidden"]):not([type="submit"]):not([readonly]), textarea:not([readonly]), select',
+            (els) => els.map((el) => {
+              const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+              const id = input.id || ''
+              const name = (input as HTMLInputElement).name || ''
+              const sel = id ? `#${id}` : name ? `[name="${name}"]` : ''
+              if (!sel) return null
+              // Find associated label
+              let label = ''
+              if (id) {
+                const lbl = document.querySelector(`label[for="${id}"]`)
+                if (lbl) label = lbl.textContent?.trim() ?? ''
+              }
+              if (!label) {
+                const closest = input.closest('label, [class*="field"], [class*="Field"]')
+                if (closest) label = closest.textContent?.replace(input.value, '').trim() ?? ''
+              }
+              const required = input.required || input.getAttribute('aria-required') === 'true'
+              return { selector: sel, label, inputType: input.type || input.tagName.toLowerCase(), tagName: input.tagName.toLowerCase(), required }
+            }).filter(Boolean)
+          ).catch(() => [])
+
+          if (bambooLiveFields.length > 0) {
+            rawFields = (bambooLiveFields as typeof rawFields)
+              .filter(f => !/link to this job/i.test(f.label ?? ''))
+          } else {
+            // Final fallback: parse from HTML
+            const bambooHtml = await page.content().catch(() => '')
+            rawFields = extractFieldsFromHtml(bambooHtml)
+              .filter(f => !/^#ot-|^#onetrust-|ot-group|ot-sub-group|vendor-search|#chkbox-id|select-all-.*-handler|link to this job/i.test(f.label ?? f.selector))
+          }
           console.log('[browserApply] BambooHR form fields:', JSON.stringify(rawFields.map(f => ({ sel: f.selector, label: f.label, type: f.inputType, tag: f.tagName, req: f.required }))))
         }
 
@@ -2917,18 +2967,23 @@ export async function browserApply(
         const VALIDATION_ERROR_PATTERNS = [/please fill in/i, /required field/i, /field is required/i, /this field is required/i, /invalid email/i, /please enter/i, /cannot be blank/i]
         const hasValidationError = VALIDATION_ERROR_PATTERNS.some(p => p.test(finalText))
         const postSubmitPageUrl = page.url()
+
+        // Greenhouse: redirects back to the job listing page on success. The listing page
+        // always contains form field labels with "required" text, so hasValidationError would
+        // incorrectly be true. Check Greenhouse BEFORE the validation error gate.
+        if (submitTimeDomain.includes('greenhouse.io') || postSubmitPageUrl.includes('greenhouse.io')) {
+          return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
+        }
+
         if (!hasValidationError) {
-          // Greenhouse: redirects back to the job listing page — no "thank you" URL to match.
-          // Still on greenhouse.io + no validation error = submitted successfully.
-          if (submitTimeDomain.includes('greenhouse.io') || postSubmitPageUrl.includes('greenhouse.io')) {
-            return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
-          }
-          // Lever: redirects away from /apply URL on success, or shows confirmation text.
+          // Lever: redirects away from /apply URL on success, shows confirmation text, or
+          // stays on /apply but shows the uploaded resume (confirmation with same URL).
           if (submitTimeDomain.includes('lever.co') && (
-            /application.*submit|thank you for applying|we.ve received/i.test(finalText) ||
+            /application.*submit|thank you for applying|we.ve received|your application has been/i.test(finalText) ||
             postSubmitPageUrl.includes('/confirmation') ||
             postSubmitPageUrl.includes('/thanks') ||
-            !postSubmitPageUrl.includes('/apply')
+            !postSubmitPageUrl.includes('/apply') ||
+            /\.pdf\s+success|resume.*success|cv.*success/i.test(finalText)
           )) {
             return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
           }
