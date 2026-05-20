@@ -114,16 +114,26 @@ async function humanClick(
 }
 
 async function humanScroll(page: import('playwright').Page): Promise<void> {
-  await page.evaluate(async () => {
-    // Use full page height — no cap; Greenhouse forms with disability sections can exceed 4000px
-    const total = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
-    const steps = 12
-    for (let i = 1; i <= steps; i++) {
-      window.scrollTo(0, (total / steps) * i)
-      await new Promise(r => setTimeout(r, 150 + Math.random() * 150))
+  // Pass as a raw string so tsx/esbuild never processes the inner code — avoids the
+  // `__name is not defined` ReferenceError that occurs when esbuild wraps named
+  // functions inside page.evaluate with its own __name() helper at compile time.
+  await page.evaluate(`(async () => {
+    var appEl = document.querySelector('#application');
+    var mainEl = document.querySelector('main');
+    function ovScrollable(el) {
+      if (!el) return false;
+      var ov = getComputedStyle(el).overflowY;
+      return (ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight + 10;
     }
-    // Stay at bottom — submit button is there; do not reset to top
-  })
+    var container = ovScrollable(appEl) ? appEl : ovScrollable(mainEl) ? mainEl : null;
+    var steps = 16;
+    for (var i = 1; i <= steps; i++) {
+      var winH = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+      window.scrollTo(0, (winH / steps) * i);
+      if (container) container.scrollTop = (container.scrollHeight / steps) * i;
+      await new Promise(function(r) { setTimeout(r, 120 + Math.random() * 130); });
+    }
+  })()`)
 }
 
 // ── Fill a single field in Playwright ────────────────────────────────────────
@@ -167,31 +177,99 @@ async function fillField(
     }
 
     if (fieldType === 'select') {
-      // Try native <select> first (by label then by value)
-      const nativeWorked = await page.selectOption(selector, { label: value }, { timeout: 2000 })
-        .then(() => true).catch(() => false)
-      if (!nativeWorked) {
-        await page.selectOption(selector, value, { timeout: 1000 }).catch(() => {})
-        // Custom dropdown fallback (React Select, Greenhouse new board, etc.)
-        // Click to open the dropdown, then click the matching [role="option"] element
-        await page.click(selector, { timeout: 2000 }).catch(() => {})
-        await page.waitForTimeout(400)
-        const clickedOption = await page.evaluate((targetValue: string) => {
-          const options = Array.from(document.querySelectorAll('[role="option"]'))
-          for (const opt of options) {
-            const text = (opt.textContent ?? '').trim().toLowerCase()
-            if (text === targetValue.toLowerCase() || text.includes(targetValue.toLowerCase()) || targetValue.toLowerCase().includes(text)) {
-              ;(opt as HTMLElement).click()
+      // Expand 2-letter US state abbreviations to full names for ATS dropdowns (e.g. BambooHR Fabric UI)
+      const US_STATES: Record<string, string> = {
+        AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California',
+        CO: 'Colorado', CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia',
+        HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa',
+        KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland',
+        MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri',
+        MT: 'Montana', NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey',
+        NM: 'New Mexico', NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio',
+        OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina',
+        SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah', VT: 'Vermont',
+        VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming',
+        DC: 'District of Columbia',
+      }
+      const fullStateName = US_STATES[value.trim().toUpperCase()] ?? null
+      const valuesToTry = fullStateName ? [value, fullStateName] : [value]
+
+      // First: try native Playwright selectOption (works for visible native <select>)
+      let selectedOk = false
+      for (const attempt of valuesToTry) {
+        const byLabel = await page.selectOption(selector, { label: attempt }, { timeout: 2000 })
+          .then(() => true).catch(() => false)
+        if (byLabel) { selectedOk = true; break }
+        const byValue = await page.selectOption(selector, attempt, { timeout: 1000 })
+          .then(() => true).catch(() => false)
+        if (byValue) { selectedOk = true; break }
+      }
+
+      if (!selectedOk) {
+        // Second: force-set via evaluate — works even on hidden native <select> elements
+        // (e.g. BambooHR Fabric UI Dropdown hides the native <select> for accessibility)
+        const forceSet = await page.evaluate(({ sel, targets }: { sel: string; targets: string[] }) => {
+          const el = document.querySelector(sel) as HTMLSelectElement | null
+          if (!el) return false
+          for (const target of targets) {
+            const tl = target.toLowerCase()
+            const option = Array.from(el.options).find(o =>
+              o.text.trim().toLowerCase() === tl ||
+              o.value.trim().toLowerCase() === tl
+            )
+            if (option) {
+              el.value = option.value
+              el.dispatchEvent(new Event('change', { bubbles: true }))
+              el.dispatchEvent(new Event('input', { bubbles: true }))
               return true
             }
           }
           return false
-        }, value)
-        if (!clickedOption) {
-          // Type to filter, then click first matching option
-          await page.keyboard.type(value, { delay: 50 }).catch(() => {})
-          await page.waitForTimeout(400)
-          await page.locator(`[role="option"]:has-text("${value}")`).first().click({ timeout: 2000 }).catch(() => {})
+        }, { sel: selector, targets: valuesToTry })
+
+        if (!forceSet) {
+          // Third: Fabric UI Dropdown — click the visible button trigger adjacent to the hidden select,
+          // wait for the dropdown Callout to appear, then click the matching [role="option"] item.
+          await page.evaluate(({ sel }: { sel: string }) => {
+            const el = document.querySelector(sel) as HTMLElement | null
+            if (!el) return
+            // Walk up to the Fabric UI container and click the visible button/trigger
+            const container = el.closest('[class*="Dropdown"], [class*="dropdown"], [class*="Select"], [data-automationid]')
+            const trigger = container?.querySelector('button, [role="combobox"], [role="listbox"]') as HTMLElement | null
+            if (trigger) trigger.click()
+            else {
+              // Fallback: click a visible sibling/parent button
+              let parent = el.parentElement
+              while (parent && parent !== document.body) {
+                const btn = parent.querySelector('button:not([aria-hidden])') as HTMLElement | null
+                if (btn) { btn.click(); break }
+                parent = parent.parentElement
+              }
+            }
+          }, { sel: selector })
+          await page.waitForTimeout(500)
+          // After dropdown opens, click the matching option
+          const clickedOption = await page.evaluate((targets: string[]) => {
+            const options = Array.from(document.querySelectorAll('[role="option"]'))
+            for (const target of targets) {
+              const tl = target.toLowerCase()
+              for (const opt of options) {
+                const text = (opt.textContent ?? '').trim().toLowerCase()
+                if (text === tl || text.includes(tl) || tl.includes(text)) {
+                  ;(opt as HTMLElement).click()
+                  return true
+                }
+              }
+            }
+            return false
+          }, valuesToTry)
+          if (!clickedOption) {
+            // Last resort: type to filter and click
+            const typeValue = fullStateName ?? value
+            await page.keyboard.type(typeValue, { delay: 50 }).catch(() => {})
+            await page.waitForTimeout(400)
+            await page.locator(`[role="option"]:has-text("${typeValue}")`).first().click({ timeout: 2000 }).catch(() => {})
+          }
         }
       }
       return
@@ -217,18 +295,55 @@ async function fillField(
       return
     }
 
+    // tel inputs — use fill() atomically to avoid intl-tel-input stealing the first digit
+    if (fieldType === 'tel') {
+      const telLoc = page.locator(selector).first()
+      await telLoc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+      await telLoc.click({ timeout: 3000 }).catch(() => {})
+      await telLoc.fill(value, { timeout: 5000 }).catch(async () => {
+        await page.keyboard.type(value, { delay: 30 }).catch(() => {})
+      })
+      return
+    }
+
     // text / textarea — check for location autocomplete
-    const isLocation = /location|city/i.test(selector + value)
+    const isLocation = /location|city/i.test(selector)
     if (isLocation) {
-      await page.click(selector, { timeout: 3000 }).catch(() => {})
-      // Type character by character for autocomplete
-      for (const char of value) {
-        await page.type(selector, char, { delay: 80 })
+      // Greenhouse location uses a React-controlled autocomplete. pressSequentially fires
+      // real keyboard events so React updates its state; then we click the first suggestion.
+      const loc = page.locator(selector).first()
+      await loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+      await loc.click({ timeout: 3000 }).catch(() => {})
+      await loc.fill('', { timeout: 2000 }).catch(() => {})
+      await loc.pressSequentially(value, { delay: 80 }).catch(async () => {
+        // Fallback: page.type fires real keyboard events too
+        await page.type(selector, value, { delay: 80 }).catch(() => {})
+      })
+      await page.waitForTimeout(1000)
+      // Click the first autocomplete suggestion if one appeared
+      const suggestion = page.locator('[role="option"], [class*="autocomplete"] li, [class*="suggestion"], [class*="pac-item"]').first()
+      const suggestionVisible = await suggestion.isVisible({ timeout: 800 }).catch(() => false)
+      if (suggestionVisible) {
+        await suggestion.click({ timeout: 2000 }).catch(() => {})
+      } else {
+        // No suggestion — press Tab to commit the typed value and move focus away
+        await page.keyboard.press('Tab').catch(() => {})
       }
-      await page.waitForTimeout(1200)
-      // Click first autocomplete suggestion if it appears
-      const suggestion = await page.$('[role="option"], [class*="autocomplete"] li, [class*="suggestion"]')
-      if (suggestion) await suggestion.click().catch(() => {})
+      return
+    }
+
+    // For BambooHR Fabric UI TextFields, use locator.pressSequentially() which handles
+    // focus + trusted keystrokes atomically — more reliable than page.click() + keyboard.type()
+    // over Steel.dev's remote browser where click coordinates can miss.
+    if (page.url().includes('bamboohr.com') && selector.match(/^#Fabric|^#fab-|^#FabricText|^#desiredPay|^#websiteUrl|^#linkedinUrl|^#desiredPay|^#customQuestion/i)) {
+      const locator = page.locator(selector).first()
+      await locator.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+      await locator.click({ timeout: 3000, force: true }).catch(() => {})
+      await locator.fill('', { timeout: 2000 }).catch(() => {}) // clear first
+      await locator.pressSequentially(value, { delay: 30 }).catch(async () => {
+        // fallback: fill directly
+        await locator.fill(value, { timeout: 3000 }).catch(() => {})
+      })
       return
     }
 
@@ -620,7 +735,12 @@ export async function browserApply(
 
       context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        viewport: { width: 1920, height: 1080 },
+        // 1366×768 matches the most common laptop resolution and is what Greenhouse's
+        // centered form layout is tuned for.  1920px was too wide — combined with
+        // CloakBrowser's Retina pixel ratio it caused forms to appear left-shifted.
+        // 1366×768 matches the most common laptop resolution Greenhouse is tuned for.
+        // Note: deviceScaleFactor is intentionally omitted — CloakBrowser crashes if set.
+        viewport: { width: 1366, height: 768 },
         locale: 'en-US',
         timezoneId: 'America/New_York',
       })
@@ -1664,25 +1784,34 @@ export async function browserApply(
           // BambooHR Fabric UI renders inputs via React — use live DOM query instead of HTML parse
           const bambooLiveFields = await page.$$eval(
             'input:not([type="hidden"]):not([type="submit"]):not([readonly]), textarea:not([readonly]), select',
-            (els) => els.map((el) => {
-              const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
-              const id = input.id || ''
-              const name = (input as HTMLInputElement).name || ''
-              const sel = id ? `#${id}` : name ? `[name="${name}"]` : ''
-              if (!sel) return null
-              // Find associated label
-              let label = ''
-              if (id) {
-                const lbl = document.querySelector(`label[for="${id}"]`)
-                if (lbl) label = lbl.textContent?.trim() ?? ''
-              }
-              if (!label) {
-                const closest = input.closest('label, [class*="field"], [class*="Field"]')
-                if (closest) label = closest.textContent?.replace(input.value, '').trim() ?? ''
-              }
-              const required = input.required || input.getAttribute('aria-required') === 'true'
-              return { selector: sel, label, inputType: input.type || input.tagName.toLowerCase(), tagName: input.tagName.toLowerCase(), required }
-            }).filter(Boolean)
+            (els) => {
+              let fileIndex = 0
+              return els.map((el) => {
+                const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+                const id = input.id || ''
+                const name = (input as HTMLInputElement).name || ''
+                const type = (input as HTMLInputElement).type || ''
+                // For file inputs with no id/name, generate a stable nth-of-type selector
+                let sel = id ? `#${id}` : name ? `[name="${name}"]` : ''
+                if (!sel && type === 'file') {
+                  sel = `input[type="file"]:nth-of-type(${++fileIndex})`
+                }
+                if (!sel) return null
+                // Find associated label
+                let label = ''
+                if (id) {
+                  const lbl = document.querySelector(`label[for="${id}"]`)
+                  if (lbl) label = lbl.textContent?.trim() ?? ''
+                }
+                if (!label) {
+                  const closest = input.closest('label, [class*="field"], [class*="Field"]')
+                  if (closest) label = closest.textContent?.replace(input.value, '').trim() ?? ''
+                }
+                if (!label && type === 'file') label = 'Resume'
+                const required = input.required || input.getAttribute('aria-required') === 'true'
+                return { selector: sel, label, inputType: type || input.tagName.toLowerCase(), tagName: input.tagName.toLowerCase(), required }
+              }).filter(Boolean)
+            }
           ).catch(() => [])
 
           if (bambooLiveFields.length > 0) {
@@ -1945,6 +2074,18 @@ export async function browserApply(
         }
       }
 
+      // Reset zoom to 100% — CloakBrowser can launch with a non-1.0 device scale
+      // that makes Greenhouse render at ~50% width ("half screen" bug).
+      if (page.url().includes('greenhouse.io')) {
+        await page.evaluate(() => {
+          document.documentElement.style.zoom = '1'
+          document.body.style.zoom = '1'
+          document.body.style.transform = ''
+          document.body.style.transformOrigin = ''
+        })
+        await page.waitForTimeout(300)
+      }
+
       // Scroll to simulate reading before filling
       await humanScroll(page)
 
@@ -2077,12 +2218,28 @@ export async function browserApply(
         }
       }
 
-      // Force scroll to bottom so the submit button is reachable regardless of page height
+      // Force scroll to the absolute bottom — use three complementary methods so
+      // Greenhouse's lazy-rendered disability/EEO sections are fully in the DOM
+      // before we try to click Submit:
+      //   1. window.scrollTo to the full document height
+      //   2. #application container scroll (Greenhouse's own overflow wrapper)
+      //   3. keyboard End key — guaranteed to reach page bottom regardless of overflow
+      await page.evaluate(() => {
+        // Reset horizontal scroll so the form stays centered (prevents left-shift)
+        window.scrollTo(0, 0)
+        document.documentElement.scrollLeft = 0
+        document.body.scrollLeft = 0
+      })
+      await page.waitForTimeout(150)
       await page.evaluate(() => {
         const h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
         window.scrollTo(0, h)
+        const container = document.querySelector('#application') as HTMLElement | null
+        if (container) container.scrollTop = container.scrollHeight
       })
-      await page.waitForTimeout(600)
+      // Keyboard End key as a guaranteed fallback — scrolls whatever element has focus
+      await page.keyboard.press('End')
+      await page.waitForTimeout(800)
 
       // Find the submit button — Greenhouse uses #submit_app specifically.
       // page.evaluate only accepts native CSS selectors; Playwright :has-text is used separately.
@@ -2141,8 +2298,123 @@ export async function browserApply(
       await humanClick(page, submitLocator)
       await page.waitForTimeout(4000)
 
-      const screenshotUrl = await takeScreenshot(page, `submitted-${applicationId}`)
-      const finalText = await page.evaluate(() => document.body.innerText)
+      let screenshotUrl = await takeScreenshot(page, `submitted-${applicationId}`)
+      let finalText = await page.evaluate(() => document.body.innerText)
+
+      // ── Post-submit: detect red validation errors and re-fill ─────────────────
+      // Greenhouse shows red field labels + inline error messages for unfilled required
+      // fields. Detect them, re-fill, and resubmit once.
+      const GH_ERROR_PATTERNS = [/please fill in/i, /required field/i, /field is required/i, /this field is required/i, /invalid email/i, /please enter/i, /select a country/i]
+      const hasValidationErrors = GH_ERROR_PATTERNS.some(p => p.test(finalText))
+
+      if (hasValidationErrors && page.url().includes('greenhouse.io')) {
+        console.log('[browserApply] GH post-submit: validation errors detected — re-filling and resubmitting')
+        await takeScreenshot(page, `post-submit-errors-${applicationId}`)
+
+        // Collect which fields have visible error messages (red inline text)
+        const errorFields = await page.evaluate(() => {
+          const errors: Array<{ selector: string; label: string; errorText: string }> = []
+          // Greenhouse renders inline errors as small red text with class names containing 'error'
+          // OR as red-colored labels for the field above them
+          const errorEls = Array.from(document.querySelectorAll(
+            '[class*="error"]:not([class*="error-page"]), .field-error, [role="alert"]'
+          ))
+          for (const el of errorEls) {
+            const txt = (el.textContent ?? '').trim()
+            if (!txt || txt.length > 100) continue
+            // Find the associated input by walking up to the field container
+            const container = el.closest('.field, [class*="field-"], [class*="Field"], section') ?? el.parentElement
+            const inp = container?.querySelector('input:not([type="hidden"]):not([type="submit"]), textarea, select') as HTMLInputElement | null
+            if (inp && inp.id) {
+              errors.push({ selector: `#${inp.id}`, label: inp.id, errorText: txt })
+            }
+          }
+          // Also check for red-border fields (Greenhouse adds red border on invalid)
+          const invalidInputs = Array.from(document.querySelectorAll('input[aria-invalid="true"], select[aria-invalid="true"]')) as HTMLInputElement[]
+          for (const inp of invalidInputs) {
+            if (inp.id && !errors.find(e => e.selector === `#${inp.id}`)) {
+              errors.push({ selector: `#${inp.id}`, label: inp.id, errorText: 'invalid' })
+            }
+          }
+          return errors
+        }).catch(() => [] as Array<{ selector: string; label: string; errorText: string }>)
+
+        console.log(`[browserApply] GH post-submit errors:`, errorFields.map(e => `${e.selector}: "${e.errorText}"`).join(', '))
+
+        // Re-fill problematic fields
+        for (const errField of errorFields) {
+          const sel = errField.selector
+          const label = errField.label.toLowerCase()
+
+          if (sel === '#country' || label.includes('country')) {
+            // Re-trigger country supplementary fill
+            await page.keyboard.press('Escape').catch(() => {})
+            await page.waitForTimeout(150)
+            const countryOpened = await page.evaluate(() => {
+              const input = document.getElementById('country')
+              if (!input) return false
+              let el: Element | null = input
+              while (el) {
+                const cls = el.className?.toString() ?? ''
+                if (cls.includes('select__control') || cls.includes('select__container')) {
+                  ;(el as HTMLElement).click()
+                  return true
+                }
+                el = el.parentElement
+              }
+              return false
+            }).catch(() => false)
+            if (countryOpened) {
+              await page.waitForTimeout(800)
+              const opts = await page.locator('[class*="select__option"]').all()
+              for (const opt of opts) {
+                const t = (await opt.textContent().catch(() => '')).trim()
+                if (/united states/i.test(t)) { await opt.click().catch(() => {}); break }
+              }
+            }
+          } else if (sel === '#candidate-location' || label.includes('location')) {
+            const loc = page.locator('#candidate-location').first()
+            await loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+            await loc.click({ timeout: 3000 }).catch(() => {})
+            await loc.fill('', { timeout: 2000 }).catch(() => {})
+            await loc.pressSequentially(profile.location?.split(',')[0]?.trim() ?? 'Charlotte', { delay: 80 }).catch(() => {})
+            await page.waitForTimeout(1000)
+            const sug = page.locator('[role="option"], [class*="autocomplete"] li, [class*="suggestion"]').first()
+            if (await sug.isVisible({ timeout: 800 }).catch(() => false)) {
+              await sug.click({ timeout: 2000 }).catch(() => {})
+            } else {
+              await page.keyboard.press('Tab').catch(() => {})
+            }
+          } else if (sel === '#phone' || label.includes('phone')) {
+            const phoneLoc = page.locator('#phone').first()
+            await phoneLoc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+            await phoneLoc.click({ timeout: 2000 }).catch(() => {})
+            await phoneLoc.fill(profile.phone ?? '', { timeout: 3000 }).catch(() => {})
+          }
+        }
+
+        if (errorFields.length > 0) {
+          await page.waitForTimeout(1000)
+          // Scroll to submit and resubmit
+          const resubmitSel = await page.evaluate((): string | null => {
+            const byId = document.querySelector('#submit_app')
+            if (byId) return '#submit_app'
+            const btn = document.querySelector('button[type="submit"]:not([disabled]), input[type="submit"]:not([disabled])')
+            return btn ? (btn.id ? `#${btn.id}` : 'button[type="submit"]') : null
+          })
+          if (resubmitSel) {
+            const resubmitLoc = page.locator(resubmitSel).first()
+            await resubmitLoc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {})
+            await page.waitForTimeout(500)
+            await takeScreenshot(page, `pre-resubmit-${applicationId}`)
+            await humanClick(page, resubmitLoc)
+            await page.waitForTimeout(4000)
+            screenshotUrl = await takeScreenshot(page, `resubmitted-${applicationId}`)
+            finalText = await page.evaluate(() => document.body.innerText)
+          }
+        }
+      }
+
       await prisma.application.update({ where: { id: applicationId }, data: { bypassMethod } }).catch(() => {})
 
       if (SUCCESS_PATTERNS.some(p => p.test(finalText))) {
@@ -2151,7 +2423,6 @@ export async function browserApply(
 
       // Greenhouse redirects back to the job listing page on success — no "thank you" page.
       // Detect by: still on greenhouse.io URL + no validation error visible on page.
-      const GH_ERROR_PATTERNS = [/please fill in/i, /required field/i, /field is required/i, /this field is required/i, /invalid email/i, /please enter/i]
       const postSubmitUrl = page.url()
       if (
         (effectiveUrl.includes('greenhouse.io') || postSubmitUrl.includes('greenhouse.io')) &&
@@ -2173,7 +2444,19 @@ export async function browserApply(
     // ── STEP 7–8: Fill form fields + handle multi-step (external ATS) ─────────
     for (let step = 0; step < MAX_STEPS; step++) {
       // #12 — Scroll before first field fill to simulate reading
-      if (step === 0) await humanScroll(page)
+      if (step === 0) {
+        // Reset zoom so Greenhouse doesn't render at half-width
+        if (page.url().includes('greenhouse.io')) {
+          await page.evaluate(() => {
+            document.documentElement.style.zoom = '1'
+            document.body.style.zoom = '1'
+            document.body.style.transform = ''
+            document.body.style.transformOrigin = ''
+          })
+          await page.waitForTimeout(300)
+        }
+        await humanScroll(page)
+      }
 
       const currentText = await page.evaluate(() => document.body.innerText)
 
@@ -2192,14 +2475,23 @@ export async function browserApply(
       // dropdown interaction below).  Skipping them here avoids a 10-minute CDP
       // keystroke-by-keystroke hang on every "N/A" typed into a hidden input.
       const isGreenhouse = page.url().includes('greenhouse.io')
+      // EEO fields (#gender, #hispanic_ethnicity, #veteran_status, #disability_status) are
+      // React Select dropdowns — typing text into them (page.fill) filters to "No options".
+      // Skip them in the first pass; they're handled by the supplementary EEO section below.
+      // Also skip #country — it's a React Select and handled by supplementary section 2 below.
+      const GH_EEO_SELECTORS = new Set(['#gender', '#hispanic_ethnicity', '#veteran_status', '#disability_status'])
       const fieldsToFill = isGreenhouse
-        ? fillMapping.filter(f => !f.selector.includes('question_'))
+        ? fillMapping.filter(f => !f.selector.includes('question_') && !GH_EEO_SELECTORS.has(f.selector) && f.selector !== '#country')
         : fillMapping
       for (const field of fieldsToFill) {
         // Also apply any user-provided answers that override
         const value = userAnswers[field.selector] ?? field.value
         console.log(`[browserApply] Filling field: ${field.selector} (${field.fieldType}) = "${value.slice(0, 40)}"`)
         await fillField(page, field.selector, value, field.fieldType, profile, tempFiles)
+      }
+
+      if (isGreenhouse) {
+        await takeScreenshot(page, `phase-post-basic-fill-${applicationId}`)
       }
 
       // ── Greenhouse new board supplementary fill ──────────────────────────────
@@ -2210,7 +2502,7 @@ export async function browserApply(
       // then click [role="option"].  We use rawFields label data to pick values.
       //
       // Also handles Greenhouse checkbox groups: technical skills and background.
-      if (page.url().includes('greenhouse.io')) {
+      if (isGreenhouse) {
         console.log('[browserApply] Greenhouse — supplementary React Select + checkbox fill')
         try {
           // ── 1a. Plain-text question_ inputs (LinkedIn, GitHub, URL, salary, etc.) ──
@@ -2237,13 +2529,34 @@ export async function browserApply(
             }, sel.replace(/^#/, '')).catch(() => false)
             if (isReactSelectBacked) continue
 
+            const profileState = (profile.location ?? '').split(',')[1]?.trim() ?? ''
+            const profileCity  = (profile.location ?? '').split(',')[0]?.trim() ?? ''
+
             let directValue = ''
-            if (/linkedin/i.test(hint))                                     directValue = profile.linkedin ?? ''
-            else if (/github/i.test(hint))                                  directValue = profile.github ?? ''
-            else if (/portfolio|personal.*site|website/i.test(hint))       directValue = profile.github ?? ''
+            if (/linkedin/i.test(hint))                                             directValue = profile.linkedin ?? ''
+            else if (/github/i.test(hint))                                          directValue = profile.github ?? ''
+            else if (/portfolio|personal.*site|website/i.test(hint))               directValue = profile.github ?? ''
             else if (/salary|compensation|desired.*pay|expected.*pay/i.test(hint)) directValue = profile.desiredSalary ?? ''
-            else if (/city/i.test(hint))                                    directValue = (profile.location ?? '').split(',')[0]?.trim() ?? ''
-            else if (/state|province/i.test(hint))                         directValue = (profile.location ?? '').split(',')[1]?.trim() ?? ''
+            else if (/\bcity\b/i.test(hint))                                        directValue = profileCity
+            else if (/state.*reside|reside.*state|which state|select.*state|state.*located/i.test(hint)) directValue = profileState
+            else if (/\bstate\b|\bprovince\b/i.test(hint))                          directValue = profileState
+            else if (/current.*company|employer|organization/i.test(hint))          directValue = profile.currentCompany ?? 'N/A'
+            else if (/npi\s*number/i.test(hint))                                    directValue = 'N/A'
+            else if (/how.*hear|source|referral|where.*find|learn.*about|first.*hear/i.test(hint)) directValue = 'Other'
+            // Behavioral / preference questions that are plain text inputs (not React Select)
+            else if (/management.*style|style.*management|prefer.*supervisor|supervisor.*prefer/i.test(hint)) directValue = 'Collaborative and direct feedback'
+            else if (/unexpected.*challenge|challenge.*approach|first.*approach.*challenge/i.test(hint))      directValue = 'Break it down into smaller pieces and collaborate with teammates'
+            else if (/comfort.*escalat|escalat.*comfort|roadblock.*escalat/i.test(hint))                     directValue = 'High — I escalate early with context'
+            else if (/program.*language|language.*proficient|most.*proficient/i.test(hint))                  directValue = 'TypeScript'
+            else if (/ai.*tool|llm.*familiar|familiar.*llm|familiar.*ai/i.test(hint))                       directValue = 'Claude'
+            else if (/ask.*ai.*tool|use.*ai.*tool|ai.*input.*feedback/i.test(hint))                         directValue = 'Yes — I use AI tools throughout my workflow'
+            // "Do you have experience with [specific tool/platform]?" → No unless it's a common one
+            else if (/do you have experience|experience.*owning|experience.*administering|experience.*managing/i.test(hint)) directValue = 'No'
+            // Prior employer checks (Alphabet/Google, specific companies)
+            else if (/alphabet|google.*employee|employee.*alphabet|contractor.*alphabet/i.test(hint))        directValue = 'No'
+            else if (/previously.*employee|employee.*previously|prior.*employee|been.*employee/i.test(hint)) directValue = 'No'
+            // Medicaid / CAQH / NPI / clinical checks — fallback to "No" / "N/A"
+            else if (/medicaid|caqh|enrolled|enrollment/i.test(hint))               directValue = 'No'
 
             if (!directValue) continue
             await page.fill(sel, directValue, { timeout: 3000 }).catch(() => {})
@@ -2262,6 +2575,8 @@ export async function browserApply(
             if (!sel.includes('question_') || field.tagName.toUpperCase() !== 'INPUT') continue
             if (field.inputType === 'checkbox' || field.inputType === 'radio') continue
 
+            const profileStateDropdown = (profile.location ?? '').split(',')[1]?.trim() ?? ''
+
             let targetValue = ''
             // IMPORTANT: Check "by submitting" FIRST — its long legal text contains
             // "interview engineer" and would false-match the "previously" pattern below.
@@ -2278,11 +2593,62 @@ export async function browserApply(
             else if (/how.*hear|source|referral|where.*find|learn.*about|first.*hear/i.test(hint))        targetValue = 'Other'
             else if (/sponsor|visa|h1b/i.test(hint))                                                      targetValue = 'No'
             else if (/authoriz|eligible|work.*permit|legal.*work/i.test(hint))                            targetValue = 'Yes'
+            else if (/located.*follow.*countr|which.*countr.*located|countr.*you.*located/i.test(hint))   targetValue = 'Yes'
             else if (/country/i.test(hint))                                                               targetValue = 'United States'
+            // State where you reside — try abbreviated then full name
+            else if (/state.*reside|reside.*state|select.*state|which.*state|state.*located/i.test(hint)) targetValue = profileStateDropdown
             else if (/gender|pronoun/i.test(hint))                                                        targetValue = 'Decline to self-identify'
             else if (/race|ethnic/i.test(hint))                                                           targetValue = 'Decline to self-identify'
             else if (/veteran|military/i.test(hint))                                                      targetValue = 'I am not a protected veteran'
             else if (/disabilit/i.test(hint))                                                             targetValue = 'No, I do not have a disability'
+            // Prior/current employer checks
+            else if (/alphabet|google.*employee|employee.*alphabet|contractor.*alphabet/i.test(hint))     targetValue = 'No'
+            else if (/previously.*employee|been.*employee|prior.*contractor/i.test(hint))                 targetValue = 'No'
+            // "Do you have experience with [specific tool]?" → No
+            else if (/do you have experience|experience.*owning|experience.*administering/i.test(hint))   targetValue = 'No'
+            // Behavioral/preference dropdowns — map to reasonable first-pass values
+            else if (/management.*style|style.*management|prefer.*supervisor/i.test(hint))                targetValue = 'Collaborative'
+            else if (/unexpected.*challenge|challenge.*approach/i.test(hint))                             targetValue = 'Collaborate'
+            else if (/comfort.*escalat|escalat.*comfort/i.test(hint))                                     targetValue = 'High'
+            else if (/program.*language|language.*proficient/i.test(hint))                                targetValue = 'TypeScript'
+            else if (/ai.*tool|llm.*familiar|familiar.*llm/i.test(hint))                                  targetValue = 'ChatGPT'
+            else if (/ask.*ai.*tool|use.*ai.*tool|ai.*input.*feedback/i.test(hint))                      targetValue = 'Yes'
+            // Medicaid / CAQH / NPI / clinical
+            else if (/medicaid|caqh|enrolled/i.test(hint))                                                targetValue = 'No'
+
+            // If no pattern matched AND the field is required, fall through to first-option picker below
+            const hasPattern = !!targetValue
+            if (!hasPattern && !field.required) continue
+            if (!hasPattern) {
+              // Required field with no pattern — open dropdown and pick first available option
+              const inputIdFallback = sel.replace(/^#/, '')
+              await page.keyboard.press('Escape').catch(() => {})
+              await page.waitForTimeout(150)
+              const lblFallback = page.locator(`label[for="${inputIdFallback}"] + div`)
+              const fbClicked = await lblFallback.click({ timeout: 2000 }).then(() => true).catch(() => false)
+              if (!fbClicked) await page.locator(sel).locator('xpath=..').click({ timeout: 2000 }).catch(() => {})
+              await page.waitForTimeout(600)
+              const fbListbox = page.locator(
+                '[role="listbox"]:not([class*="iti"]):not([class*="country-list"]), [class*="select__menu"]'
+              ).first()
+              const fbVisible = await fbListbox.isVisible({ timeout: 1500 }).catch(() => false)
+              if (fbVisible) {
+                const fbOpts = await fbListbox.locator('[role="option"], li').all()
+                // Skip placeholder "Select..." option (index 0 is often a placeholder)
+                const firstReal = fbOpts.find(async o => {
+                  const t = (await o.textContent().catch(() => '')).trim().toLowerCase()
+                  return t && t !== 'select' && !t.startsWith('select...')
+                }) ?? fbOpts[1] ?? fbOpts[0]
+                if (firstReal) {
+                  const picked = (await firstReal.textContent().catch(() => '')).trim()
+                  await firstReal.click().catch(() => {})
+                  console.log(`[browserApply] GH dropdown fallback "${hint.slice(0, 40)}" → first option "${picked}"`)
+                }
+              }
+              await page.keyboard.press('Escape').catch(() => {})
+              await page.waitForTimeout(300)
+              continue
+            }
 
             if (!targetValue) continue
 
@@ -2355,16 +2721,58 @@ export async function browserApply(
                   }
                 }
               }
+              // Pass 4: expand 2-letter US state abbreviation to full name
+              // (Greenhouse state dropdowns list full names like "North Carolina")
+              if (!selected && /^[A-Z]{2}$/.test(targetValue.trim())) {
+                const US_STATES_EXPAND: Record<string, string> = {
+                  AL: 'Alabama', AK: 'Alaska', AZ: 'Arizona', AR: 'Arkansas', CA: 'California',
+                  CO: 'Colorado', CT: 'Connecticut', DE: 'Delaware', FL: 'Florida', GA: 'Georgia',
+                  HI: 'Hawaii', ID: 'Idaho', IL: 'Illinois', IN: 'Indiana', IA: 'Iowa',
+                  KS: 'Kansas', KY: 'Kentucky', LA: 'Louisiana', ME: 'Maine', MD: 'Maryland',
+                  MA: 'Massachusetts', MI: 'Michigan', MN: 'Minnesota', MS: 'Mississippi', MO: 'Missouri',
+                  MT: 'Montana', NE: 'Nebraska', NV: 'Nevada', NH: 'New Hampshire', NJ: 'New Jersey',
+                  NM: 'New Mexico', NY: 'New York', NC: 'North Carolina', ND: 'North Dakota', OH: 'Ohio',
+                  OK: 'Oklahoma', OR: 'Oregon', PA: 'Pennsylvania', RI: 'Rhode Island', SC: 'South Carolina',
+                  SD: 'South Dakota', TN: 'Tennessee', TX: 'Texas', UT: 'Utah', VT: 'Vermont',
+                  VA: 'Virginia', WA: 'Washington', WV: 'West Virginia', WI: 'Wisconsin', WY: 'Wyoming',
+                  DC: 'District of Columbia',
+                }
+                const fullName = US_STATES_EXPAND[targetValue.trim().toUpperCase()]
+                if (fullName) {
+                  for (const opt of allOptions) {
+                    const text = (await opt.textContent().catch(() => '')).trim()
+                    if (text.toLowerCase() === fullName.toLowerCase() || text.toLowerCase().startsWith(fullName.toLowerCase())) {
+                      await opt.click().catch(() => {})
+                      selected = text
+                      break
+                    }
+                  }
+                }
+              }
               if (selected) {
                 console.log(`[browserApply] GH dropdown "${hint.slice(0, 40)}" → "${selected}"`)
               } else {
-                // Log actual option texts to help debug future no-match cases
-                const optTexts: string[] = []
+                // No text match — fall back to picking the first non-placeholder option.
+                // This handles numbered choices ("1 - Hands-on: ...", "1 - Very Comfortable: ...")
+                // that don't contain our target keyword.
                 for (const opt of allOptions) {
-                  const t = (await opt.textContent().catch(() => '')).trim()
-                  if (t) optTexts.push(`"${t}"`)
+                  const t = (await opt.textContent().catch(() => '')).trim().toLowerCase()
+                  if (t && t !== 'select' && !t.startsWith('select...') && t !== '') {
+                    const optText = (await opt.textContent().catch(() => '')).trim()
+                    await opt.click().catch(() => {})
+                    console.log(`[browserApply] GH dropdown fallback "${hint.slice(0, 40)}" → first option "${optText.slice(0, 60)}"`)
+                    selected = optText
+                    break
+                  }
                 }
-                console.log(`[browserApply] GH dropdown "${hint.slice(0, 40)}" → no match for "${targetValue}" | options: ${optTexts.join(', ')}`)
+                if (!selected) {
+                  const optTexts: string[] = []
+                  for (const opt of allOptions) {
+                    const t = (await opt.textContent().catch(() => '')).trim()
+                    if (t) optTexts.push(`"${t}"`)
+                  }
+                  console.log(`[browserApply] GH dropdown "${hint.slice(0, 40)}" → no match for "${targetValue}" | options: ${optTexts.join(', ')}`)
+                }
               }
             } else {
               console.log(`[browserApply] GH dropdown "${hint.slice(0, 40)}" → listbox not visible after click`)
@@ -2373,6 +2781,7 @@ export async function browserApply(
             await page.keyboard.press('Escape').catch(() => {})
             await page.waitForTimeout(300)
           }
+          await takeScreenshot(page, `phase-post-question-dropdowns-${applicationId}`)
 
           // ── 2. Country dropdown (React Select) ────────────────────────────────
           // The #country field on Greenhouse new board is a React Select hidden input.
@@ -2384,56 +2793,55 @@ export async function browserApply(
             await page.keyboard.press('Escape').catch(() => {})
             await page.waitForTimeout(150)
 
-            // Click the React Select control by walking up from #country input
-            const countryOpened = await page.evaluate(() => {
-              const input = document.getElementById('country')
-              if (!input) return false
-              let el: Element | null = input
-              while (el) {
-                const cls = el.className?.toString() ?? ''
-                if (cls.includes('select__control') || cls.includes('select__container')) {
-                  ;(el as HTMLElement).click()
-                  return true
-                }
-                el = el.parentElement
-              }
-              return false
-            }).catch(() => false)
+            // Use Playwright XPath locators (same approach as EEO fix — evaluate-based
+            // .click() doesn't reliably open React Select dropdowns in CloakBrowser).
+            const countryTriggers = [
+              'xpath=//input[@id="country"]/ancestor::div[contains(@class,"select__control") or contains(@class,"select__container")][1]',
+              'label[for="country"] + div',
+              'label[for="country"] ~ div',
+            ]
+            let countryMenuOpen = false
+            for (const trySel of countryTriggers) {
+              if (countryMenuOpen) break
+              const trigger = page.locator(trySel).first()
+              const cnt = await trigger.count().catch(() => 0)
+              if (cnt === 0) continue
+              await trigger.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+              await trigger.click({ timeout: 3000, force: true }).catch(() => {})
+              await page.waitForTimeout(700)
+              const menuVis = await page.locator('[class*="select__menu"], [class*="select__option"]').first().isVisible({ timeout: 1500 }).catch(() => false)
+              if (menuVis) { countryMenuOpen = true; break }
+              await page.keyboard.press('Escape').catch(() => {})
+              await page.waitForTimeout(200)
+            }
 
-            if (countryOpened) {
-              await page.waitForTimeout(800)
-              // Scope to the React Select menu, NOT intl-tel-input country lists
-              const countryListbox = page.locator('[class*="select__menu"], [class*="select__option"]').first()
-              const menuVisible = await countryListbox.isVisible({ timeout: 2000 }).catch(() => false)
-              if (menuVisible) {
-                const opts = await page.locator('[class*="select__option"]').all()
-                let found = false
-                for (const opt of opts) {
-                  const text = (await opt.textContent().catch(() => '')).trim()
-                  if (/^united states$/i.test(text) || text === 'United States') {
-                    await opt.click().catch(() => {})
-                    console.log(`[browserApply] GH country → "${text}"`)
-                    found = true
-                    break
-                  }
+            if (countryMenuOpen) {
+              const opts = await page.locator('[class*="select__option"]').all()
+              let found = false
+              for (const opt of opts) {
+                const text = (await opt.textContent().catch(() => '')).trim()
+                if (/^united states$/i.test(text)) {
+                  await opt.click().catch(() => {})
+                  console.log(`[browserApply] GH country → "${text}"`)
+                  found = true
+                  break
                 }
-                if (!found) {
-                  // Fallback: type to filter then pick first match
-                  const countryInput = page.locator('[class*="select__input"] input').first()
-                  await countryInput.type('United States', { delay: 50 }).catch(() => {})
-                  await page.waitForTimeout(600)
-                  const filtered = page.locator('[class*="select__option"]').first()
-                  const filteredVisible = await filtered.isVisible({ timeout: 1000 }).catch(() => false)
-                  if (filteredVisible) {
-                    const filteredText = (await filtered.textContent().catch(() => '')).trim()
-                    await filtered.click().catch(() => {})
-                    console.log(`[browserApply] GH country (typed) → "${filteredText}"`)
-                  }
+              }
+              if (!found) {
+                // Type to filter, then pick first result
+                const countrySearchInput = page.locator('[class*="select__input"] input').first()
+                await countrySearchInput.type('United States', { delay: 50 }).catch(() => {})
+                await page.waitForTimeout(600)
+                const filtered = page.locator('[class*="select__option"]').first()
+                if (await filtered.isVisible({ timeout: 1000 }).catch(() => false)) {
+                  const filteredText = (await filtered.textContent().catch(() => '')).trim()
+                  await filtered.click().catch(() => {})
+                  console.log(`[browserApply] GH country (typed) → "${filteredText}"`)
                 }
               }
               await page.keyboard.press('Escape').catch(() => {})
             } else {
-              console.log('[browserApply] GH country: could not find select__control to click')
+              console.log('[browserApply] GH country: could not open dropdown — Country field may stay empty')
             }
           }
 
@@ -2468,6 +2876,128 @@ export async function browserApply(
               console.log(`[browserApply] GH checkbox checked: "${field.label}"`)
             }
           }
+
+          // ── 5. EEO dropdowns (#gender, #hispanic_ethnicity, #veteran_status, #disability_status) ──
+          // These are React Select dropdowns. We must click the styled trigger div,
+          // then pick an option from the listbox. Typing text directly causes "No options"
+          // because React Select filters by typed text.
+          await takeScreenshot(page, `phase-pre-eeo-${applicationId}`)
+          const EEO_FIELDS = [
+            { id: 'gender',             preferred: ['decline', 'prefer not', "don't wish", 'not to say', 'not listed'] },
+            { id: 'hispanic_ethnicity', preferred: ['decline', 'prefer not', "don't wish", 'not to say', 'no'] },
+            { id: 'veteran_status',     preferred: ['not a protected', 'decline', 'prefer not', "don't wish", 'not to say'] },
+            { id: 'disability_status',  preferred: ['no, i do not', 'do not have', 'decline', 'prefer not', "don't wish", 'not to say'] },
+          ]
+          for (const eeoField of EEO_FIELDS) {
+            const eeoEl = rawFields.find(f => f.selector === `#${eeoField.id}`)
+            if (!eeoEl) continue
+
+            await page.keyboard.press('Escape').catch(() => {})
+            await page.waitForTimeout(150)
+
+            // Scroll input into view first
+            await page.locator(`#${eeoField.id}`).scrollIntoViewIfNeeded({ timeout: 3000 }).catch(async () => {
+              await page.locator(`label[for="${eeoField.id}"]`).scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+            })
+            await page.waitForTimeout(400)
+
+            // Match React Select menu/options — must filter to VISIBLE because 250+ hidden
+            // option elements from other dropdowns also match this selector in the DOM
+            const EEO_MENU_SEL = '[role="option"], .select__option, [class*="__option"], .select__menu, [class*="__menu"]'
+            const isEeoMenuOpen = async (): Promise<boolean> =>
+              page.locator(EEO_MENU_SEL).filter({ visible: true }).first().isVisible({ timeout: 500 }).catch(() => false)
+
+            // Strategy 1: Click select__control div (depth 3 from input) without force, then
+            //             dispatch native mousedown which React Select actually listens to
+            let opened = false
+            const controlLoc3 = page.locator(`xpath=//input[@id="${eeoField.id}"]/../../..`).first()
+            const ctrl3Count = await controlLoc3.count().catch(() => 0)
+            if (ctrl3Count > 0) {
+              await controlLoc3.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+              await page.waitForTimeout(200)
+              // Dispatch native mousedown (React Select opens on mousedown, not click)
+              await page.evaluate((id: string) => {
+                const input = document.getElementById(id)
+                const ctrl = input?.parentElement?.parentElement?.parentElement
+                if (ctrl) {
+                  ctrl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, buttons: 1 }))
+                  ctrl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, buttons: 0 }))
+                  ctrl.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+                }
+              }, eeoField.id)
+              await page.waitForTimeout(800)
+              if (await isEeoMenuOpen()) opened = true
+            }
+
+            // Strategy 2: Playwright locator click (full event sequence)
+            if (!opened) {
+              await page.keyboard.press('Escape').catch(() => {})
+              await page.waitForTimeout(150)
+              await controlLoc3.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+              await controlLoc3.click({ timeout: 3000 }).catch(async () => {
+                await controlLoc3.click({ force: true, timeout: 2000 }).catch(() => {})
+              })
+              await page.waitForTimeout(800)
+              if (await isEeoMenuOpen()) opened = true
+            }
+
+            // Strategy 3: mouse.click at exact bounding box coordinates
+            if (!opened) {
+              await page.keyboard.press('Escape').catch(() => {})
+              await page.waitForTimeout(150)
+              const box = await controlLoc3.boundingBox().catch(() => null)
+              if (box && box.width > 40) {
+                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+                await page.waitForTimeout(800)
+                if (await isEeoMenuOpen()) opened = true
+              }
+            }
+
+            if (!opened) {
+              console.log(`[browserApply] GH EEO #${eeoField.id}: could not open dropdown`)
+              continue
+            }
+
+            // Select preferred option from VISIBLE options only (filter avoids hidden options
+            // from other dropdowns that share the same [role="option"] selector)
+            const eeoOpts = await page.locator('[role="option"], .select__option, [class*="__option"]').filter({ visible: true }).all()
+            let selected = ''
+
+            for (const keyword of eeoField.preferred) {
+              if (selected) break
+              for (const opt of eeoOpts) {
+                const text = (await opt.textContent().catch(() => '')).trim().toLowerCase()
+                if (text.includes(keyword)) {
+                  const optText = (await opt.textContent().catch(() => '')).trim()
+                  await opt.click({ force: true }).catch(() => {})
+                  selected = optText
+                  break
+                }
+              }
+            }
+
+            if (!selected && eeoOpts.length > 0) {
+              for (const opt of eeoOpts) {
+                const t = (await opt.textContent().catch(() => '')).trim().toLowerCase()
+                if (t && t !== 'select' && !t.startsWith('select...')) {
+                  const optText = (await opt.textContent().catch(() => '')).trim()
+                  await opt.click({ force: true }).catch(() => {})
+                  selected = optText
+                  break
+                }
+              }
+            }
+
+            if (selected) {
+              console.log(`[browserApply] GH EEO #${eeoField.id} → "${selected}"`)
+            } else {
+              console.log(`[browserApply] GH EEO #${eeoField.id}: no option selected`)
+            }
+            await page.keyboard.press('Escape').catch(() => {})
+            await page.waitForTimeout(300)
+          }
+          await takeScreenshot(page, `phase-post-eeo-${applicationId}`)
+
         } catch (err) {
           console.warn('[browserApply] Greenhouse supplementary fill error:', err instanceof Error ? err.message : String(err))
         }
@@ -2554,7 +3084,28 @@ export async function browserApply(
         return null
       }, isTrakstarPage)
 
-      // Scroll the button into view before checking visibility
+      // Scroll to the absolute bottom before checking/clicking submit:
+      // 1. Reset horizontal scroll so Greenhouse form stays centered
+      // 2. Scroll window + #application container to bottom
+      // 3. keyboard End as guaranteed fallback for overflow containers
+      if (page.url().includes('greenhouse.io')) {
+        await page.evaluate(() => {
+          window.scrollTo(0, 0)
+          document.documentElement.scrollLeft = 0
+          document.body.scrollLeft = 0
+        })
+        await page.waitForTimeout(150)
+        await page.evaluate(() => {
+          const h = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)
+          window.scrollTo(0, h)
+          const container = document.querySelector('#application') as HTMLElement | null
+          if (container) container.scrollTop = container.scrollHeight
+        })
+        await page.keyboard.press('End')
+        await page.waitForTimeout(600)
+      }
+
+      // Scroll the specific button into view before checking visibility
       if (foundAtsSelector) {
         await page.evaluate((sel: string) => {
           const el = document.querySelector(sel)
@@ -2776,22 +3327,79 @@ export async function browserApply(
           // Re-fill all fields after reCAPTCHA solve — CAPTCHA interaction can
           // reset form values (e.g. on Trakstar), so we fill again right before submit.
           // Use page.fill() for text/textarea to REPLACE (not append like page.type() does).
+          //
+          // BambooHR: Fabric UI re-renders after CAPTCHA, generating new FabricTextField-* IDs.
+          // Re-detect live fields and rebuild the fill mapping with fresh selectors.
+          if (page.url().includes('bamboohr.com')) {
+            const refreshedFields = await page.$$eval(
+              'input:not([type="hidden"]):not([type="submit"]):not([readonly]), textarea:not([readonly]), select',
+              (els) => {
+                let fileIndex = 0
+                return els.map((el) => {
+                  const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+                  const id = input.id || ''
+                  const name = (input as HTMLInputElement).name || ''
+                  const type = (input as HTMLInputElement).type || ''
+                  let sel = id ? `#${id}` : name ? `[name="${name}"]` : ''
+                  if (!sel && type === 'file') sel = `input[type="file"]:nth-of-type(${++fileIndex})`
+                  if (!sel) return null
+                  let label = ''
+                  if (id) {
+                    const lbl = document.querySelector(`label[for="${id}"]`)
+                    if (lbl) label = lbl.textContent?.trim() ?? ''
+                  }
+                  if (!label) {
+                    const closest = input.closest('label, [class*="field"], [class*="Field"]')
+                    if (closest) label = closest.textContent?.replace(input.value, '').trim() ?? ''
+                  }
+                  if (!label && type === 'file') label = 'Resume'
+                  const required = input.required || input.getAttribute('aria-required') === 'true'
+                  return { selector: sel, label, inputType: type || input.tagName.toLowerCase(), tagName: input.tagName.toLowerCase(), required }
+                }).filter(Boolean)
+              }
+            ).catch(() => [] as typeof fillMapping)
+            // Rebuild fillMapping with fresh selectors — carry values from old mapping
+            if (refreshedFields.length > 0) {
+              const oldValMap = new Map(fillMapping.map(f => [f.label?.trim().toLowerCase().replace(/\s*\*$/, ''), f]))
+              const newMapping = []
+              for (const rf of refreshedFields) {
+                const labelKey = (rf.label ?? '').trim().toLowerCase().replace(/\s*\*$/, '')
+                const old = oldValMap.get(labelKey)
+                if (old) newMapping.push({ ...old, selector: rf.selector })
+              }
+              if (newMapping.length > 0) {
+                console.log(`[browserApply] BambooHR post-CAPTCHA: refreshed ${newMapping.length} field selectors`)
+                fillMapping = newMapping
+              }
+            }
+          }
           console.log('[browserApply] Re-filling fields post-reCAPTCHA solve')
           await Promise.race([
             (async () => {
               for (const field of fillMapping) {
                 const value = userAnswers[field.selector] ?? field.value
                 if (field.fieldType === 'text' || field.fieldType === 'textarea') {
-                  await page.fill(field.selector, value, { timeout: 3000 }).catch(() => {})
+                  const isBambooFabric = page.url().includes('bamboohr.com') && field.selector.match(/^#Fabric|^#fab-|^#FabricText|^#desiredPay|^#websiteUrl|^#linkedinUrl|^#customQuestion/i)
+                  if (isBambooFabric) {
+                    const loc = page.locator(field.selector).first()
+                    await loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+                    await loc.click({ timeout: 3000, force: true }).catch(() => {})
+                    await loc.fill('', { timeout: 2000 }).catch(() => {})
+                    await loc.pressSequentially(value, { delay: 30 }).catch(async () => {
+                      await loc.fill(value, { timeout: 3000 }).catch(() => {})
+                    })
+                  } else {
+                    await page.fill(field.selector, value, { timeout: 3000 }).catch(() => {})
+                  }
                 } else {
                   await Promise.race([
                     fillField(page, field.selector, value, field.fieldType, profile, tempFiles),
-                    new Promise<void>(r => setTimeout(r, 4000)),
+                    new Promise<void>(r => setTimeout(r, 6000)),
                   ]).catch(() => {})
                 }
               }
             })(),
-            new Promise<void>(r => setTimeout(r, 30_000)), // never block more than 30s total on re-fill
+            new Promise<void>(r => setTimeout(r, 45_000)), // never block more than 45s total on re-fill
           ])
 
           // On Greenhouse, re-check checkboxes that reCAPTCHA solving may have reset
@@ -2968,10 +3576,114 @@ export async function browserApply(
         const hasValidationError = VALIDATION_ERROR_PATTERNS.some(p => p.test(finalText))
         const postSubmitPageUrl = page.url()
 
-        // Greenhouse: redirects back to the job listing page on success. The listing page
-        // always contains form field labels with "required" text, so hasValidationError would
-        // incorrectly be true. Check Greenhouse BEFORE the validation error gate.
+        // Greenhouse: check if the application form is still present with filled values.
+        // If #first_name still has a value, we're still on the form (validation errors
+        // blocked submission). If the form is gone or first_name is empty, submission succeeded.
         if (submitTimeDomain.includes('greenhouse.io') || postSubmitPageUrl.includes('greenhouse.io')) {
+          const ghFormStillShowing = await page.evaluate((): boolean => {
+            const fn = document.getElementById('first_name') as HTMLInputElement | null
+            // Form still showing if first_name input exists and has a non-empty value
+            return fn !== null && fn.value.trim().length > 0
+          }).catch(() => false)
+
+          if (ghFormStillShowing) {
+            // Form is still on screen — validation errors blocked submission.
+            // Collect error messages and attempt to fix + resubmit.
+            const ghErrors = await page.evaluate(() => {
+              const texts: string[] = []
+              document.querySelectorAll('[class*="error"], [aria-invalid="true"], label[style*="color"]').forEach(el => {
+                const t = (el.textContent ?? '').trim()
+                if (t && t.length < 100) texts.push(t)
+              })
+              // Also grab any inline validation messages
+              document.querySelectorAll('small, .field-error, [role="alert"]').forEach(el => {
+                const t = (el.textContent ?? '').trim()
+                if (t && t.length < 100) texts.push(t)
+              })
+              return [...new Set(texts)]
+            }).catch(() => [] as string[])
+            console.log('[browserApply] GH submit blocked — form still showing. Errors:', ghErrors.slice(0, 5))
+
+            // Re-fill country if still empty
+            const countryEmpty = await page.evaluate(() => {
+              const el = document.getElementById('country') as HTMLInputElement | null
+              return el ? el.value.trim() === '' : false
+            }).catch(() => false)
+            if (countryEmpty) {
+              const countryTriggers2 = [
+                'xpath=//input[@id="country"]/ancestor::div[contains(@class,"select__control") or contains(@class,"select__container")][1]',
+                'label[for="country"] + div',
+              ]
+              for (const trySel of countryTriggers2) {
+                const trigger = page.locator(trySel).first()
+                if (await trigger.count().catch(() => 0) === 0) continue
+                await trigger.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+                await trigger.click({ timeout: 3000, force: true }).catch(() => {})
+                await page.waitForTimeout(700)
+                const opts = await page.locator('[class*="select__option"]').all()
+                for (const opt of opts) {
+                  if (/^united states$/i.test((await opt.textContent().catch(() => '')).trim())) {
+                    await opt.click().catch(() => {})
+                    console.log('[browserApply] GH country retry → "United States"')
+                    break
+                  }
+                }
+                if (opts.length > 0) break
+                await page.keyboard.press('Escape').catch(() => {})
+              }
+            }
+
+            // Re-fill location if still empty
+            const locationEmpty = await page.evaluate(() => {
+              const el = document.getElementById('candidate-location') as HTMLInputElement | null
+              return el ? el.value.trim() === '' : false
+            }).catch(() => false)
+            if (locationEmpty) {
+              const locLoc = page.locator('#candidate-location').first()
+              await locLoc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
+              await locLoc.click({ timeout: 3000 }).catch(() => {})
+              const city = (profile.location ?? 'Charlotte').split(',')[0].trim()
+              await locLoc.pressSequentially(city, { delay: 80 }).catch(() => {})
+              await page.waitForTimeout(1000)
+              const sug = page.locator('[role="option"]').first()
+              if (await sug.isVisible({ timeout: 800 }).catch(() => false)) {
+                await sug.click({ timeout: 2000 }).catch(() => {})
+              } else {
+                await page.keyboard.press('Tab').catch(() => {})
+              }
+              console.log(`[browserApply] GH location retry → "${city}"`)
+            }
+
+            // Scroll to submit and resubmit
+            await page.waitForTimeout(1000)
+            const ghResubmitSel = submitNativeSelector ?? '#submit_app'
+            const ghResubmitLoc = page.locator(ghResubmitSel).first()
+            await ghResubmitLoc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {})
+            await takeScreenshot(page, `pre-resubmit-${applicationId}`)
+            await page.waitForTimeout(800)
+            await humanClick(page, ghResubmitLoc)
+            await page.waitForTimeout(5000)
+            postSubmitUrl = await takeScreenshot(page, `resubmitted-${applicationId}`)
+            finalText = await page.evaluate(() => document.body.innerText)
+            console.log(`[browserApply] GH resubmit page text: ${finalText.slice(0, 200).replace(/\s+/g, ' ')}`)
+
+            // Check again if form is still showing
+            const stillOnForm = await page.evaluate((): boolean => {
+              const fn = document.getElementById('first_name') as HTMLInputElement | null
+              return fn !== null && fn.value.trim().length > 0
+            }).catch(() => false)
+            if (stillOnForm) {
+              return {
+                status: 'needs_review',
+                errorMessage: `GH form still showing after resubmit — errors: ${ghErrors.slice(0, 3).join('; ')}`,
+                applyUrl,
+                screenshotUrl: postSubmitUrl,
+                preSubmitScreenshotUrl: preSubmitUrl,
+                bypassMethod,
+              }
+            }
+          }
+
           return { status: 'applied', applyUrl, screenshotUrl: postSubmitUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
         }
 
