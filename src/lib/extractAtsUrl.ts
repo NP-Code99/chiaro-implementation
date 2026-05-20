@@ -4,7 +4,7 @@ import { prisma } from './db'
 
 // Known external ATS domains — sorted by specificity
 const ATS_PATTERNS = [
-  { pattern: /boards\.greenhouse\.io|job-boards\.greenhouse\.io/i, ats: 'GREENHOUSE'     },
+  { pattern: /boards\.greenhouse\.io|job-boards\.greenhouse\.io|gh_jid=|\/gh\/jobs/i, ats: 'GREENHOUSE' },
   { pattern: /jobs\.lever\.co/i,                                    ats: 'LEVER'         },
   { pattern: /apply\.workday\.com|myworkdayjobs\.com/i,             ats: 'WORKDAY'       },
   { pattern: /bamboohr\.com\/careers\//i,                           ats: 'BAMBOOHR'      },

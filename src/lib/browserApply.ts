@@ -723,9 +723,18 @@ export async function browserApply(
       include: { job: { select: { atsType: true } } },
     }).then(a => a?.job?.atsType ?? null).catch(() => null)
 
+    // Greenhouse URL patterns:
+    //   greenhouse.io    — standard/new board (boards.greenhouse.io, job-boards.greenhouse.io)
+    //   gh_jid=          — Greenhouse embedded job ID query param on company career pages
+    //   /gh/jobs         — Greenhouse embedded form path on company career pages
+    const isGhUrl = (url: string) =>
+      url.includes('greenhouse.io') ||
+      url.includes('gh_jid=') ||
+      url.includes('/gh/jobs')
+
     const isGreenhouseUrl =
-      effectiveUrl.includes('greenhouse.io') ||
-      applyUrl.includes('greenhouse.io') ||
+      isGhUrl(effectiveUrl) ||
+      isGhUrl(applyUrl) ||
       resolved.atsType === 'GREENHOUSE' ||
       dbAtsType === 'GREENHOUSE'
 
@@ -929,7 +938,7 @@ export async function browserApply(
     // redirect to Greenhouse. addInitScript persists across navigations in the context,
     // so it fires on the Greenhouse page even though applyUrl is a startup.jobs URL.
     // Without this, the startup.jobs→Greenhouse flow submits with Steel's low-score token.
-    if (applyUrl.includes('greenhouse.io') || effectiveUrl.includes('greenhouse.io') || applyUrl.includes('startup.jobs') || effectiveUrl.includes('startup.jobs')) {
+    if (isGreenhouseUrl || applyUrl.includes('startup.jobs') || effectiveUrl.includes('startup.jobs')) {
       // Expose the CapSolver solver to the browser page context
       await page.exposeFunction(
         '__capsolverEnterpriseExecute',
@@ -2139,7 +2148,7 @@ export async function browserApply(
 
       // Reset zoom to 100% — CloakBrowser can launch with a non-1.0 device scale
       // that makes Greenhouse render at ~50% width ("half screen" bug).
-      if (page.url().includes('greenhouse.io')) {
+      if (isGhUrl(page.url())) {
         await page.evaluate(() => {
           document.documentElement.style.zoom = '1'
           document.body.style.zoom = '1'
@@ -2372,7 +2381,7 @@ export async function browserApply(
       // there is a transient server error. Retry submit once — reCAPTCHA execute()
       // is called fresh on each submit click so a new valid token is obtained.
       const GH_SERVER_ERROR = /there was an error processing your application/i
-      const hasServerError = GH_SERVER_ERROR.test(finalText) && page.url().includes('greenhouse.io')
+      const hasServerError = GH_SERVER_ERROR.test(finalText) && isGhUrl(page.url())
       if (hasServerError) {
         console.log('[browserApply] GH server error after submit — waiting 4s and retrying once')
         await page.waitForTimeout(4000)
@@ -2395,7 +2404,7 @@ export async function browserApply(
 
       const hasValidationErrors = GH_ERROR_PATTERNS.some(p => p.test(finalText))
 
-      if (hasValidationErrors && page.url().includes('greenhouse.io')) {
+      if (hasValidationErrors && isGhUrl(page.url())) {
         console.log('[browserApply] GH post-submit: validation errors detected — re-filling and resubmitting')
         await takeScreenshot(page, `post-submit-errors-${applicationId}`)
 
@@ -2513,7 +2522,7 @@ export async function browserApply(
       // Detect by: still on greenhouse.io URL + no validation error + no server error visible.
       const postSubmitUrl = page.url()
       if (
-        (effectiveUrl.includes('greenhouse.io') || postSubmitUrl.includes('greenhouse.io')) &&
+        (isGhUrl(effectiveUrl) || isGhUrl(postSubmitUrl)) &&
         !GH_ERROR_PATTERNS.some(p => p.test(finalText)) &&
         !GH_SERVER_ERROR.test(finalText)
       ) {
@@ -2535,7 +2544,7 @@ export async function browserApply(
       // #12 — Scroll before first field fill to simulate reading
       if (step === 0) {
         // Reset zoom so Greenhouse doesn't render at half-width
-        if (page.url().includes('greenhouse.io')) {
+        if (isGhUrl(page.url())) {
           await page.evaluate(() => {
             document.documentElement.style.zoom = '1'
             document.body.style.zoom = '1'
@@ -2563,7 +2572,7 @@ export async function browserApply(
       // typing into them does nothing useful (values are set by the supplementary fill
       // dropdown interaction below).  Skipping them here avoids a 10-minute CDP
       // keystroke-by-keystroke hang on every "N/A" typed into a hidden input.
-      const isGreenhouse = page.url().includes('greenhouse.io')
+      const isGreenhouse = isGhUrl(page.url())
       // EEO fields (#gender, #hispanic_ethnicity, #veteran_status, #disability_status, and
       // numeric-ID variants like #4000681004 used by Grafana) are React Select dropdowns —
       // typing text into them (page.fill) filters to "No options".
@@ -3298,7 +3307,7 @@ export async function browserApply(
       // 1. Reset horizontal scroll so Greenhouse form stays centered
       // 2. Scroll window + #application container to bottom
       // 3. keyboard End as guaranteed fallback for overflow containers
-      if (page.url().includes('greenhouse.io')) {
+      if (isGhUrl(page.url())) {
         await page.evaluate(() => {
           window.scrollTo(0, 0)
           document.documentElement.scrollLeft = 0
@@ -3357,7 +3366,7 @@ export async function browserApply(
           if (!steelSolved) {
             // Greenhouse uses reCAPTCHA Enterprise (enterprise.js). Use Enterprise task.
             // All other sites fall back to v2.
-            const isGreenhousePage = page.url().includes('greenhouse.io')
+            const isGreenhousePage = isGhUrl(page.url())
             console.log(`[browserApply] reCAPTCHA not auto-solved — escalating to CapSolver ${isGreenhousePage ? 'reCAPTCHA Enterprise' : 'reCAPTCHA v2'}`)
 
             // For Enterprise: scan inline scripts for 6L... sitekey; fallback to known key
@@ -3447,7 +3456,7 @@ export async function browserApply(
             // task type is ReCaptchaV3EnterpriseTaskProxyLess. The sitekey is embedded in
             // the JS bundle config (not as a ?render= URL param), confirmed as:
             // 6LfmcbcpAAAAAChNTbhUShzUOAMj_wY9LQIvLFX0
-            if (page.url().includes('greenhouse.io')) {
+            if (isGhUrl(page.url())) {
               console.log('[browserApply] Greenhouse: replacing reCAPTCHA Enterprise token with CapSolver high-score token')
               // Extract the enterprise sitekey from the page's embedded JS config object
               const enterpriseSiteKey = await page.evaluate((): string | null => {
@@ -3710,7 +3719,7 @@ export async function browserApply(
 
                 // Determine if this is a React Select field (Greenhouse question_ dropdowns)
                 const isGhReactSelect = (
-                  page.url().includes('greenhouse.io') &&
+                  isGhUrl(page.url()) &&
                   /^#question_/.test(field.selector) &&
                   (field.fieldType === 'text' || field.fieldType === 'select')
                 )
@@ -3744,7 +3753,7 @@ export async function browserApply(
           ])
 
           // Re-check checkboxes — they can be reset by reCAPTCHA page interactions
-          if (page.url().includes('greenhouse.io')) {
+          if (isGhUrl(page.url())) {
             const GH_CHECKBOX_ALWAYS = [
               /privacy.*notice|candidate.*privacy|acknowledge.*privacy/i,
               /\backnowledge\b/i, /\bconsent\b/i, /i agree|i accept/i,
@@ -3952,7 +3961,7 @@ export async function browserApply(
         // Greenhouse: check if the application form is still present with filled values.
         // If #first_name still has a value, we're still on the form (validation errors
         // blocked submission). If the form is gone or first_name is empty, submission succeeded.
-        if (submitTimeDomain.includes('greenhouse.io') || postSubmitPageUrl.includes('greenhouse.io')) {
+        if (isGhUrl(submitTimeDomain) || isGhUrl(postSubmitPageUrl) || isGreenhouseUrl) {
           const ghFormStillShowing = await page.evaluate((): boolean => {
             const fn = document.getElementById('first_name') as HTMLInputElement | null
             // Form still showing if first_name input exists and has a non-empty value
