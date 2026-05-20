@@ -685,13 +685,14 @@ export async function browserApply(
     }
 
     // ── STEP 6: Browser launch — route by ATS type ───────────────────────────────
-    // All applications use CloakBrowser + CapSolver + Scrapfly.
-    // CloakBrowser patches Chromium at C++ level — passes Greenhouse reCAPTCHA Enterprise,
-    // Cloudflare managed-challenge, and DataDome reliably. Steel.dev is not used.
+    // Browser routing:
+    //   • Greenhouse  → CloakBrowser + CapSolver (reCAPTCHA Enterprise requires C++-patched browser)
+    //   • Everything else (Lever, BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
+    //   • Native Wellfound → CloakBrowser (DataDome path — unchanged)
     const isGreenhouseUrl = effectiveUrl.includes('greenhouse.io') || resolved.atsType === 'GREENHOUSE'
     const isStartupJobsNative = effectiveUrl.includes('startup.jobs')
     const steelApiKey = process.env.STEEL_API_KEY
-    const useSteel = false
+    const useSteel = !isGreenhouseUrl && !isNativeWellfound && !!steelApiKey
     console.log(`[browserApply] ATS routing: ${resolved.atsType ?? 'unknown'} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
     let context: import('playwright').BrowserContext
