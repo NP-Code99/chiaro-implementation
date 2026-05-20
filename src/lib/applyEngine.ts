@@ -97,6 +97,6 @@ export async function applyToJob(job: Job, profile: UserProfile, applicationId: 
     }
   }
 
-  // All applications go through Steel.dev via browserApply.
+  // All applications go through CloakBrowser + CapSolver + Scrapfly via browserApply.
   return browserApply(job.applyUrl, profile, applicationId)
 }

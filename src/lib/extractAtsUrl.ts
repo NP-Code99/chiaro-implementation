@@ -172,12 +172,35 @@ export async function resolveApplyUrl(
     return { url: rawUrl, isExternal: true, atsType: directMatch.ats }
   }
 
-  // startup.jobs wraps apply links behind a Cloudflare-protected redirect.
-  // Steel.dev (with solveCaptcha + residential proxy) handles CF and follows
-  // the redirect in-browser — no Scrapfly needed. Return the URL as-is; the
-  // live recon step in browserApply extracts the real ATS URL after navigation.
+  // startup.jobs wraps ALL apply links (native and external) behind startup.jobs/apply/{uuid}
+  // which sits behind a Cloudflare managed challenge. Use Scrapfly to follow the redirect
+  // and extract the actual ATS URL from the destination page's HTML.
   if (rawUrl.includes('startup.jobs/apply/')) {
-    console.log(`[resolveApplyUrl] startup.jobs redirect — deferring to Steel.dev browser: ${rawUrl}`)
+    console.log(`[resolveApplyUrl] startup.jobs redirect — following via Scrapfly: ${rawUrl}`)
+    try {
+      const { html } = await scrapflyFetch(rawUrl)
+      // Search the full raw HTML text (not just <a href>) — Greenhouse and other ATS
+      // forms are often embedded as <iframe src> which cheerio-based findAtsLinkInHtml misses.
+      const allUrls = extractAtsUrlsFromText(html)
+      const atsLink = allUrls[0] ?? findAtsLinkInHtml(html)
+      if (atsLink) {
+        const match = ATS_PATTERNS.find(({ pattern }) => pattern.test(atsLink))
+        const normalizedUrl = normalizeGreenhouseUrl(atsLink)
+        console.log(`[resolveApplyUrl] startup.jobs → external ATS: ${normalizedUrl}`)
+        await prisma.job.update({
+          where: { id: jobId },
+          data: {
+            applyUrl: normalizedUrl,
+            atsType: (match?.ats as 'GREENHOUSE' | 'LEVER' | 'WORKDAY' | 'BAMBOOHR' | 'CUSTOM') ?? 'CUSTOM',
+          },
+        }).catch(() => {})
+        return { url: normalizedUrl, isExternal: true, atsType: match?.ats ?? 'CUSTOM' }
+      }
+      // No known ATS found — may be a startup.jobs native form (rare)
+      console.log(`[resolveApplyUrl] No external ATS in startup.jobs redirect — treating as native`)
+    } catch (err) {
+      console.warn(`[resolveApplyUrl] Scrapfly failed on startup.jobs URL: ${err instanceof Error ? err.message : err}`)
+    }
     return { url: rawUrl, isExternal: false }
   }
 
