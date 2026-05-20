@@ -97,9 +97,11 @@ export async function applyToJob(job: Job, profile: UserProfile, applicationId: 
     }
   }
 
-  // startup.jobs/apply/ pages sit behind Cloudflare — only Steel's cloud browser
-  // with residential proxy + solveCaptcha can reliably clear it.
-  if (job.applyUrl.includes('startup.jobs/apply/')) {
+  // Greenhouse applications always go through CloakBrowser (browserApply).
+  // This covers both direct greenhouse.io URLs and startup.jobs URLs that
+  // resolve to Greenhouse ATS internally.
+  const isGreenhouse = job.applyUrl.includes('greenhouse.io') || job.applyUrl.includes('startup.jobs/apply/')
+  if (isGreenhouse) {
     return browserApply(job.applyUrl, profile, applicationId)
   }
 
