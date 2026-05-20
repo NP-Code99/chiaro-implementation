@@ -282,7 +282,9 @@ export function fallbackFormMapping(
     else if (/phone|mobile|telephone|\btel\b|cell/i.test(hint))    value = profile.phone
     else if (/linkedin/i.test(hint))                               value = profile.linkedin ?? ''
     else if (/github/i.test(hint))                                 value = profile.github ?? ''
-    else if (/portfolio|personal.*site|website/i.test(hint))       value = profile.github ?? ''
+    else if (/twitter|x\.com/i.test(hint))                         value = ''
+    else if (/portfolio|personal.*site/i.test(hint))               value = profile.github ?? ''
+    else if (/\bwebsite\b/i.test(hint) && !/other/i.test(hint))   value = ''
     else if (/\bcity\b/i.test(hint))                               value = (profile.location ?? '').split(',')[0]?.trim() ?? ''
     else if (/\bstate\b|\bprovince\b/i.test(hint))                 value = (profile.location ?? '').split(',')[1]?.trim() ?? ''
     else if (/zip|postal/i.test(hint))                             value = profile.addressZip ?? ''
@@ -293,9 +295,13 @@ export function fallbackFormMapping(
     else if (/salary|compensation|\bpay\b|desired.*pay|expected.*pay/i.test(hint)) value = profile.desiredSalary
     else if (/year.*exp|experience.*year|how.*long.*experience/i.test(hint)) value = profile.yearsExp
     else if (/how long.*remote|remote.*how long|100.*remote.*job/i.test(hint)) value = profile.yearsExp ? `${profile.yearsExp} years` : '2 years'
-    else if (/current.*title|job.*title|position.*title/i.test(hint)) value = ''
-    else if (/current.*company|employer.*if.*applic|current.*employer/i.test(hint)) value = profile.currentCompany ?? ''
-    else if (/current.*company|employer|organization/i.test(hint)) value = ''
+    else if (/current.*job.*title|current.*title|most.*recent.*title|position.*title|job.*title/i.test(hint)) value = (profile as any).currentTitle ?? 'Software Engineer'
+    else if (/current.*employer|current.*company|most.*recent.*employer|employer.*if.*applic/i.test(hint)) value = profile.currentCompany ?? ''
+    else if (/current.*company|employer|organization/i.test(hint)) value = profile.currentCompany ?? ''
+    else if (/non.?compete|non.?solicit|restrictive.*covenant/i.test(hint)) value = 'No'
+    else if (/relative|family.*member.*employ|employ.*relative/i.test(hint)) value = 'No'
+    else if (/previously.*employ|been.*employ|prior.*employ|former.*employ/i.test(hint)) value = 'No'
+    else if (/previously.*interview|gone.*through.*interview|interview.*process.*before/i.test(hint)) value = 'No'
     else if (/degree|education|major|school|university|college/i.test(hint)) value = ''
     else if (/skill|technolog|language|stack/i.test(hint))         value = ''
     else if (/sponsor|visa|h1b/i.test(hint))                       value = 'No'

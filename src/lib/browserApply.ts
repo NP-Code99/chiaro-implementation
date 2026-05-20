@@ -80,6 +80,10 @@ async function humanType(
   value: string,
 ): Promise<void> {
   await page.click(selector, { timeout: 3000 }).catch(() => {})
+  // Clear any pre-existing content (e.g. Lever autofill, browser autofill, prior partial fills)
+  // before typing — without this, character-by-character typing appends to existing content.
+  await page.keyboard.press('Control+a').catch(() => {})
+  await page.keyboard.press('Backspace').catch(() => {})
   if (value.length > 60) {
     // For long text (cover letters, bios): use page.fill() — a single RPC call that is
     // dramatically faster than page.type() over Steel's remote browser connection.
@@ -148,6 +152,23 @@ async function fillField(
 ): Promise<void> {
   try {
     await humanDelay()
+
+    // Guard: reject non-URL values going into URL-typed fields.
+    // Claude/fallback mapping sometimes returns a person's name for optional URL fields
+    // (Twitter, Portfolio, "Other website") when no actual URL is available.
+    // A name in a URL field corrupts the form — skip it entirely.
+    if (
+      fieldType === 'url' ||
+      /urls\[|url[_\s-]*(input|field)|twitter.*url|portfolio.*url|other.*website|website.*url/i.test(selector)
+    ) {
+      const looksLikeUrl = /^https?:\/\/|^www\.|linkedin\.com|github\.com|twitter\.com/i.test(value)
+      if (value && !looksLikeUrl) {
+        console.log(`[browserApply] Skipping URL field ${selector} — value "${value.slice(0, 40)}" is not a URL`)
+        return
+      }
+      // Also skip if value is empty
+      if (!value) return
+    }
 
     if (fieldType === 'file' || value === '__RESUME__') {
       let tmpPath: string
@@ -704,9 +725,17 @@ export async function browserApply(
       dbAtsType === 'GREENHOUSE'
 
     const isStartupJobsNative = effectiveUrl.includes('startup.jobs')
+    const isLeverUrl =
+      effectiveUrl.includes('lever.co') ||
+      applyUrl.includes('lever.co') ||
+      resolved.atsType === 'LEVER' ||
+      dbAtsType === 'LEVER'
     const steelApiKey = process.env.STEEL_API_KEY
-    const useSteel = !isGreenhouseUrl && !isNativeWellfound && !!steelApiKey
-    console.log(`[browserApply] ATS routing: db=${dbAtsType ?? 'unknown'} resolved=${resolved.atsType ?? '?'} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
+    // Lever uses hCaptcha which Steel's auto-solver fails on, and CapSolver does not support
+    // hCaptcha. Route Lever through CloakBrowser (49 C++ stealth patches) so hCaptcha either
+    // doesn't trigger at all, or is passable without a dedicated solver.
+    const useSteel = !isGreenhouseUrl && !isNativeWellfound && !isLeverUrl && !!steelApiKey
+    console.log(`[browserApply] ATS routing: db=${dbAtsType ?? 'unknown'} resolved=${resolved.atsType ?? '?'} lever=${isLeverUrl} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
     let context: import('playwright').BrowserContext
 
@@ -2597,16 +2626,27 @@ export async function browserApply(
             if (/linkedin/i.test(hint))                                             directValue = profile.linkedin ?? ''
             else if (/github/i.test(hint))                                          directValue = profile.github ?? ''
             else if (/portfolio|personal.*site|website/i.test(hint))               directValue = profile.github ?? ''
-            else if (/salary|compensation|desired.*pay|expected.*pay/i.test(hint)) directValue = profile.desiredSalary ?? ''
+            else if (/salary|compensation|desired.*pay|expected.*pay|salary.*expect/i.test(hint)) directValue = profile.desiredSalary ?? ''
             else if (/\bcity\b/i.test(hint))                                        directValue = profileCity
             else if (/state.*reside|reside.*state|which state|select.*state|state.*located/i.test(hint)) directValue = profileState
             else if (/\bstate\b|\bprovince\b/i.test(hint))                          directValue = profileState
-            else if (/current.*company|employer.*if.*applic|current.*employer/i.test(hint)) directValue = profile.currentCompany ?? ''
-            else if (/current.*company|employer|organization/i.test(hint))          directValue = profile.currentCompany ?? 'N/A'
+            // Current employer — match "Current (Most Recent) Employer" and similar
+            else if (/current.*employer|current.*company|employer.*if.*applic|most.*recent.*employer/i.test(hint)) directValue = profile.currentCompany ?? ''
+            else if (/employer|organization/i.test(hint))                            directValue = profile.currentCompany ?? 'N/A'
+            // Current job title — "Current (Most Recent) Job Title", "Current Title", etc.
+            else if (/current.*job.*title|current.*title|most.*recent.*title|job.*title/i.test(hint)) directValue = profile.currentTitle ?? 'Software Engineer'
             else if (/country.*time.*zone|time.*zone.*country|what.*country.*based|where.*based.*time/i.test(hint)) directValue = 'United States, Eastern Time (ET)'
             else if (/how long.*remote|remote.*how long|100.*remote.*job/i.test(hint)) directValue = profile.yearsExp ? `${profile.yearsExp} years` : '2 years'
             else if (/npi\s*number/i.test(hint))                                    directValue = 'N/A'
             else if (/how.*hear|source|referral|where.*find|learn.*about|first.*hear/i.test(hint)) directValue = 'Startup.jobs'
+            // Non-compete / restrictive covenants
+            else if (/non.?compete|non.?solicit|restrictive.*covenant/i.test(hint)) directValue = 'No'
+            // Relatives / family members employed at the company
+            else if (/relative|family.*member.*employ|employ.*relative|friend.*employ/i.test(hint)) directValue = 'No'
+            // Previously employed / worked at this company
+            else if (/previously.*employ|been.*employ|prior.*employ|former.*employ/i.test(hint))    directValue = 'No'
+            // Previously interviewed at this company
+            else if (/previously.*interview|interview.*process.*before|gone.*through.*interview/i.test(hint)) directValue = 'No'
             // Behavioral / preference questions that are plain text inputs (not React Select)
             else if (/management.*style|style.*management|prefer.*supervisor|supervisor.*prefer/i.test(hint)) directValue = 'Collaborative and direct feedback'
             else if (/unexpected.*challenge|challenge.*approach|first.*approach.*challenge/i.test(hint))      directValue = 'Break it down into smaller pieces and collaborate with teammates'
@@ -2704,6 +2744,13 @@ export async function browserApply(
             else if (/race|ethnic/i.test(hint))                                                           targetValue = 'Decline to self-identify'
             else if (/veteran|military/i.test(hint))                                                      targetValue = 'I am not a protected veteran'
             else if (/disabilit/i.test(hint))                                                             targetValue = 'No, I do not have a disability'
+            // Non-compete / restrictive covenants
+            else if (/non.?compete|non.?solicit|restrictive.*covenant/i.test(hint))                       targetValue = 'No'
+            // Relatives / family members employed at the company
+            else if (/relative|family.*member.*employ|employ.*relative/i.test(hint))                      targetValue = 'No'
+            // Previously employed or interviewed at this company
+            else if (/previously.*employ|been.*employ|prior.*employ|former.*employ/i.test(hint))          targetValue = 'No'
+            else if (/previously.*interview|interview.*process.*before|gone.*through.*interview/i.test(hint)) targetValue = 'No'
             // Prior/current employer checks
             else if (/alphabet|google.*employee|employee.*alphabet|contractor.*alphabet/i.test(hint))     targetValue = 'No'
             else if (/previously.*employee|been.*employee|prior.*contractor/i.test(hint))                 targetValue = 'No'
@@ -2963,9 +3010,18 @@ export async function browserApply(
             } catch { /* ignore */ }
           }).catch(() => {})
 
-          // ── 4. Checkboxes: check relevant technical skill boxes ──────────────
+          // ── 4. Checkboxes: privacy/consent notices (always check) + technical skills ──
           await page.keyboard.press('Escape').catch(() => {})
-          const CHECKBOX_LABELS_TO_CHECK = [
+          const CHECKBOX_ALWAYS_CHECK = [
+            // Privacy notices, candidate notices, consent, acknowledgements — always required
+            /privacy.*notice|candidate.*privacy|acknowledge.*privacy/i,
+            /\backnowledge\b/i,
+            /\bconsent\b/i,
+            /i agree|i accept|i confirm/i,
+            /terms.*condition|condition.*employment/i,
+            /eeo.*policy|equal.*opportunity/i,
+          ]
+          const CHECKBOX_SKILL_CHECK = [
             /full.?stack/i,
             /back.?end/i,
             /front.?end/i,
@@ -2974,10 +3030,16 @@ export async function browserApply(
           ]
           for (const field of rawFields) {
             if (field.inputType !== 'checkbox') continue
-            const label = (field.label ?? '').toLowerCase()
-            const shouldCheck = CHECKBOX_LABELS_TO_CHECK.some(pat => pat.test(label))
+            const label = (field.label ?? '')
+            const shouldCheck =
+              CHECKBOX_ALWAYS_CHECK.some(pat => pat.test(label)) ||
+              CHECKBOX_SKILL_CHECK.some(pat => pat.test(label))
             if (shouldCheck) {
-              await page.check(field.selector, { timeout: 3000 }).catch(() => {})
+              await page.check(field.selector, { timeout: 3000 }).catch(async () => {
+                // Fallback: click the label associated with the checkbox
+                const checkId = field.selector.replace(/^#/, '')
+                await page.locator(`label[for="${checkId}"]`).click({ timeout: 2000 }).catch(() => {})
+              })
               console.log(`[browserApply] GH checkbox checked: "${field.label}"`)
             }
           }
@@ -3582,6 +3644,19 @@ export async function browserApply(
           return /verify you are human|please complete.*security|not a robot|prove you are human/i.test(text)
         }
 
+        // Detect hCaptcha image challenge modal on the same page (no redirect).
+        // Lever triggers this after submit when it detects automation signals.
+        // CapSolver does not support hCaptcha — take a screenshot and return needs_review.
+        const checkHCaptcha = async (): Promise<boolean> => {
+          return page.evaluate((): boolean => {
+            const hFrame = document.querySelector('iframe[src*="hcaptcha.com"]') as HTMLIFrameElement | null
+            if (!hFrame) return false
+            // The challenge is only "active" when the iframe is visible and positioned on-screen
+            const rect = hFrame.getBoundingClientRect()
+            return rect.width > 0 && rect.height > 0
+          }).catch(() => false)
+        }
+
         // Poll up to 20s for a success pattern, redirect, or new CAPTCHA challenge
         const pollStart = Date.now()
         while (Date.now() - pollStart < 20000) {
@@ -3590,6 +3665,8 @@ export async function browserApply(
           if (isThirdPartyRedirect()) break
           // Only break for CAPTCHA if it's a new challenge page (not the form's own widget)
           if (hasCaptchaChallenge(finalText)) break
+          // hCaptcha image challenge (Lever) — no solver available, bail early
+          if (await checkHCaptcha()) { console.warn('[browserApply] hCaptcha challenge detected after submit'); break }
           // Only click obvious modal-style confirmation buttons — NOT "Continue" (too broad,
           // matches multi-step forms and third-party sign-in pages like Indeed).
           const confirmBtn = await page.$('button:has-text("OK"), button:has-text("Got it"), button:has-text("Done")').catch(() => null)
@@ -3666,6 +3743,19 @@ export async function browserApply(
               preSubmitScreenshotUrl: preSubmitUrl,
               bypassMethod,
             }
+          }
+        }
+
+        // Check for hCaptcha image challenge (Lever) on same-page modal — no solver available.
+        if (await checkHCaptcha()) {
+          console.warn('[browserApply] hCaptcha modal still visible post-submit — returning needs_review')
+          const hCaptchaScreenshot = await takeScreenshot(page, `hcaptcha-${applicationId}`)
+          return {
+            status: 'needs_review',
+            errorMessage: 'hCaptcha image challenge appeared — CapSolver does not support hCaptcha. Please complete the application manually.',
+            applyUrl,
+            screenshotUrl: hCaptchaScreenshot,
+            bypassMethod,
           }
         }
 

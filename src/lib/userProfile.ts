@@ -27,6 +27,7 @@ export interface UserProfile {
   ethnicity?: Ethnicity
   addressZip?: string           // Postal/ZIP code — used for forms requiring a zip code
   currentCompany?: string       // Current or most recent employer — used for "Current company" fields
+  currentTitle?: string         // Current or most recent job title — used for "Current title" fields
   education?: string            // e.g. "University of North Carolina, Chapel Hill, B.S. Computer Science"
   applicationPassword: string  // Used for ATS account creation fields — not a security credential
   wellfoundCookies?: string    // Paste from browser devtools — bypasses DataDome/Cloudflare
