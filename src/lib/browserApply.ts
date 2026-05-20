@@ -688,7 +688,7 @@ export async function browserApply(
     // All non-Wellfound applications (Greenhouse, Lever, Workday, BambooHR, Ashby, etc.) → Steel.dev
     //   • Native Wellfound → CloakBrowser (DataDome path — unchanged)
     const isGreenhouseUrl = effectiveUrl.includes('greenhouse.io') || resolved.atsType === 'GREENHOUSE'
-    const isStartupJobsNative = false  // never true after Scrapfly URL extraction
+    const isStartupJobsNative = effectiveUrl.includes('startup.jobs')
     const steelApiKey = process.env.STEEL_API_KEY
     const useSteel = !isNativeWellfound && !!steelApiKey
     console.log(`[browserApply] ATS routing: ${resolved.atsType ?? 'unknown'} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
@@ -863,7 +863,7 @@ export async function browserApply(
     // redirect to Greenhouse. addInitScript persists across navigations in the context,
     // so it fires on the Greenhouse page even though applyUrl is a startup.jobs URL.
     // Without this, the startup.jobs→Greenhouse flow submits with Steel's low-score token.
-    if (applyUrl.includes('greenhouse.io') || effectiveUrl.includes('greenhouse.io')) {
+    if (applyUrl.includes('greenhouse.io') || effectiveUrl.includes('greenhouse.io') || applyUrl.includes('startup.jobs') || effectiveUrl.includes('startup.jobs')) {
       // Expose the CapSolver solver to the browser page context
       await page.exposeFunction(
         '__capsolverEnterpriseExecute',

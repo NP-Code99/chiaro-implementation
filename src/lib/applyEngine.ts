@@ -97,13 +97,6 @@ export async function applyToJob(job: Job, profile: UserProfile, applicationId: 
     }
   }
 
-  // Greenhouse applications always go through CloakBrowser (browserApply).
-  // This covers both direct greenhouse.io URLs and startup.jobs URLs that
-  // resolve to Greenhouse ATS internally.
-  const isGreenhouse = job.applyUrl.includes('greenhouse.io') || job.applyUrl.includes('startup.jobs/apply/')
-  if (isGreenhouse) {
-    return browserApply(job.applyUrl, profile, applicationId)
-  }
-
-  return applyWithScrapfly(job, profile)
+  // All applications go through Steel.dev via browserApply.
+  return browserApply(job.applyUrl, profile, applicationId)
 }
