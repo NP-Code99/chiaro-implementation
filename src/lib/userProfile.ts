@@ -25,6 +25,7 @@ export interface UserProfile {
   disabilityStatus?: DisabilityStatus
   gender?: Gender
   ethnicity?: Ethnicity
+  addressZip?: string           // Postal/ZIP code — used for forms requiring a zip code
   applicationPassword: string  // Used for ATS account creation fields — not a security credential
   wellfoundCookies?: string    // Paste from browser devtools — bypasses DataDome/Cloudflare
   startupJobsCookies?: string  // Paste from browser devtools — bypasses Cloudflare on startup.jobs

@@ -82,7 +82,7 @@ export async function claudeFormMapping(
     address_city: profileCity,
     address_state: profileState,
     address_street: '',
-    address_zip: '',
+    address_zip: profile.addressZip ?? '',
     address_country: 'United States',
     linkedin: profile.linkedin,
     github: profile.github,
@@ -129,6 +129,7 @@ INSTRUCTIONS:
 - For password fields: use value "Chiaro2024!"
 - For salary: use profile desiredSalary if set, otherwise give a realistic range for the role and location
 - For file upload (resume): use value "__RESUME__"
+- For date available / start date fields: use value "05/26/2025" (one week from today) or the format the field expects (MM/DD/YYYY is common)
 - NEVER invent or hallucinate data. Only fill a field if the value is present in the profile above.
 - If a profile field is empty string, skip that field — do not guess or make up a value.
 - City field: use address_city from profile only. State: use address_state. Street: only if address_street is non-empty. Zip: only if address_zip is non-empty.
@@ -283,7 +284,7 @@ export function fallbackFormMapping(
     else if (/portfolio|personal.*site|website/i.test(hint))       value = profile.github ?? ''
     else if (/\bcity\b/i.test(hint))                               value = (profile.location ?? '').split(',')[0]?.trim() ?? ''
     else if (/\bstate\b|\bprovince\b/i.test(hint))                 value = (profile.location ?? '').split(',')[1]?.trim() ?? ''
-    else if (/zip|postal/i.test(hint))                             value = ''
+    else if (/zip|postal/i.test(hint))                             value = profile.addressZip ?? ''
     else if (/country/i.test(hint))                                value = 'United States'
     else if (/street|address.*line|address.*1/i.test(hint))        value = ''
     else if (/location|address/i.test(hint))                       value = profile.location ?? ''
