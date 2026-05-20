@@ -79,6 +79,11 @@ async function humanType(
   selector: string,
   value: string,
 ): Promise<void> {
+  // If the field already contains exactly the value we want (e.g. Lever resume auto-fill
+  // pre-populated name/email from the uploaded PDF), skip it — no need to retype.
+  const existing = await page.inputValue(selector, { timeout: 2000 }).catch(() => '')
+  if (existing.trim().toLowerCase() === value.trim().toLowerCase()) return
+
   await page.click(selector, { timeout: 3000 }).catch(() => {})
   // Clear any pre-existing content (e.g. Lever autofill, browser autofill, prior partial fills)
   // before typing — without this, character-by-character typing appends to existing content.
@@ -869,6 +874,23 @@ export async function browserApply(
         await context.addCookies(userCookies)
         console.log(`[browserApply] Injected ${userCookies.length} user session cookies from profile`)
       }
+    }
+
+    // #8 (Lever only) — hCaptcha accessibility cookie.
+    // Registered once at https://dashboard.hcaptcha.com/signup?type=accessibility
+    // and stored in HCAPTCHA_ACCESSIBILITY_COOKIE. When present on .hcaptcha.com
+    // the challenge auto-passes without showing an image grid.
+    if (isLeverUrl && process.env.HCAPTCHA_ACCESSIBILITY_COOKIE) {
+      await context.addCookies([{
+        name: 'hc_accessibility',
+        value: process.env.HCAPTCHA_ACCESSIBILITY_COOKIE,
+        domain: '.hcaptcha.com',
+        path: '/',
+        secure: true,
+        httpOnly: false,
+        sameSite: 'None' as const,
+      }])
+      console.log('[browserApply] Injected hCaptcha accessibility cookie (Lever)')
     }
 
     const page = await context.newPage()
@@ -3565,32 +3587,138 @@ export async function browserApply(
           // already-correct values. Re-filling disrupts React Select dropdowns that
           // were already set, causing required fields to appear blank on submission.
           console.log('[browserApply] Post-reCAPTCHA: checking for empty required fields only')
+
+          // Helper: detect React Select value via label-sibling lookup.
+          // question_* hidden inputs are NOT inside a select__ container, so
+          // el.closest('[class*="select__"]') always returns null for them.
+          // Instead find the label with for="<id>" and check its sibling div.
+          const getFieldCurrentValue = async (sel: string): Promise<string | null> => {
+            return page.evaluate((selector: string) => {
+              const inputId = selector.replace(/^#/, '')
+              const el = document.getElementById(inputId) as HTMLInputElement | null
+              if (!el) return null
+
+              // Strategy 1: label[for="X"] + div → React Select single-value text
+              const label = document.querySelector(`label[for="${inputId}"]`)
+              if (label) {
+                const sibling = label.nextElementSibling
+                if (sibling) {
+                  const sv = sibling.querySelector('[class*="select__single-value"],[class*="singleValue"]')
+                  if (sv?.textContent?.trim()) return sv.textContent.trim()
+                  // sibling has a select__control but no value → it's an empty React Select
+                  const ctrl = sibling.querySelector('[class*="select__control"],[class*="control"]')
+                  if (ctrl) return '' // empty React Select
+                }
+              }
+
+              // Strategy 2: parent/ancestor-based React Select detection (for non-question_ fields)
+              const container = el.closest('[class*="select__"]') ?? el.parentElement?.closest('[class*="select__"]')
+              if (container) {
+                const sv = container.querySelector('[class*="select__single-value"]')
+                if (sv?.textContent?.trim()) return sv.textContent.trim()
+                return '' // empty React Select
+              }
+
+              return el.value ?? ''
+            }, sel).catch(() => null)
+          }
+
+          // Helper: pick a value from an open-able React Select via label[for="X"] + div click
+          const pickReactSelectPostCaptcha = async (sel: string, targetValue: string): Promise<void> => {
+            const inputId = sel.replace(/^#/, '')
+            await page.keyboard.press('Escape').catch(() => {})
+            await page.waitForTimeout(150)
+
+            const triggerClicked = await page.locator(`label[for="${inputId}"] + div`).click({ timeout: 2000 })
+              .then(() => true).catch(() => false)
+            if (!triggerClicked) {
+              await page.locator(sel).locator('xpath=..').click({ timeout: 2000 }).catch(() => {})
+            }
+            await page.waitForTimeout(600)
+
+            const listbox = page.locator(
+              '[role="listbox"]:not([class*="iti"]):not([class*="country-list"]),' +
+              '[class*="select__menu"]'
+            ).first()
+            if (!await listbox.isVisible({ timeout: 1500 }).catch(() => false)) {
+              await page.keyboard.press('Escape').catch(() => {})
+              return
+            }
+
+            const opts = await listbox.locator('[role="option"],li').all()
+            const tvLow = targetValue.toLowerCase()
+            let selected = ''
+
+            // Pass 1: exact match
+            for (const opt of opts) {
+              const t = (await opt.textContent().catch(() => '')).trim()
+              if (t.toLowerCase() === tvLow) { await opt.click().catch(() => {}); selected = t; break }
+            }
+            // Pass 2: starts-with / prefix
+            if (!selected) {
+              for (const opt of opts) {
+                const t = (await opt.textContent().catch(() => '')).trim()
+                if (t.toLowerCase().startsWith(tvLow) || tvLow.startsWith(t.toLowerCase())) {
+                  await opt.click().catch(() => {}); selected = t; break
+                }
+              }
+            }
+            // Pass 3: word-boundary prefix
+            if (!selected) {
+              const prefixRe = new RegExp(`^${tvLow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[\\s,.]|$)`, 'i')
+              for (const opt of opts) {
+                const t = (await opt.textContent().catch(() => '')).trim()
+                if (prefixRe.test(t)) { await opt.click().catch(() => {}); selected = t; break }
+              }
+            }
+            // Pass 4: keyword search (any word from target in option text)
+            if (!selected) {
+              const keywords = tvLow.split(/\s+/).filter(w => w.length > 2)
+              for (const opt of opts) {
+                const t = (await opt.textContent().catch(() => '')).trim().toLowerCase()
+                if (keywords.some(kw => t.includes(kw))) { await opt.click().catch(() => {}); selected = t; break }
+              }
+            }
+            // Pass 5: first non-placeholder option (last resort)
+            if (!selected) {
+              for (const opt of opts) {
+                const t = (await opt.textContent().catch(() => '')).trim().toLowerCase()
+                if (t && t !== 'select' && !t.startsWith('select...')) {
+                  await opt.click().catch(() => {}); selected = t; break
+                }
+              }
+            }
+
+            if (selected) {
+              console.log(`[browserApply] Post-CAPTCHA React Select ${sel} → "${selected}"`)
+            } else {
+              await page.keyboard.press('Escape').catch(() => {})
+            }
+            await page.waitForTimeout(300)
+          }
+
           await Promise.race([
             (async () => {
               for (const field of fillMapping) {
                 const value = userAnswers[field.selector] ?? field.value
                 if (!value) continue
 
-                // Check current field value — skip if already filled
-                const currentVal = await page.evaluate((sel: string) => {
-                  const el = document.querySelector(sel) as HTMLInputElement | null
-                  if (!el) return null
-                  // For React Select, check the visible placeholder/value text
-                  const container = el.closest('[class*="select__"]') ?? el.parentElement?.closest('[class*="select__"]')
-                  if (container) {
-                    const singleVal = container.querySelector('[class*="select__single-value"]')
-                    if (singleVal?.textContent?.trim()) return singleVal.textContent.trim()
-                    const placeholder = container.querySelector('[class*="select__placeholder"]')
-                    if (placeholder?.textContent?.trim()) return '' // placeholder = empty
-                    return null // can't determine — skip for safety
-                  }
-                  return el.value ?? ''
-                }, field.selector).catch(() => null)
+                const currentVal = await getFieldCurrentValue(field.selector)
 
                 // Already has a value — skip it
                 if (currentVal && currentVal.trim().length > 0) continue
 
-                if (field.fieldType === 'text' || field.fieldType === 'textarea') {
+                // Determine if this is a React Select field (Greenhouse question_ dropdowns)
+                const isGhReactSelect = (
+                  page.url().includes('greenhouse.io') &&
+                  /^#question_/.test(field.selector) &&
+                  (field.fieldType === 'text' || field.fieldType === 'select')
+                )
+
+                if (isGhReactSelect) {
+                  await pickReactSelectPostCaptcha(field.selector, value)
+                  console.log(`[browserApply] Post-CAPTCHA filled empty field ${field.selector}`)
+                } else if (field.fieldType === 'text' || field.fieldType === 'textarea') {
                   const isBambooFabric = page.url().includes('bamboohr.com') && field.selector.match(/^#Fabric|^#fab-|^#FabricText|^#desiredPay|^#websiteUrl|^#linkedinUrl|^#customQuestion/i)
                   if (isBambooFabric) {
                     const loc = page.locator(field.selector).first()

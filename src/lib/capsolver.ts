@@ -220,6 +220,7 @@ export async function solveRecaptchaEnterprise(
   return (solution?.gRecaptchaResponse as string) ?? null
 }
 
+
 export async function solveDataDome(
   captchaUrl: string,
   _userAgent?: string,
