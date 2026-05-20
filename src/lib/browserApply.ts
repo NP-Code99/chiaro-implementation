@@ -689,11 +689,24 @@ export async function browserApply(
     //   • Greenhouse  → CloakBrowser + CapSolver (reCAPTCHA Enterprise requires C++-patched browser)
     //   • Everything else (Lever, BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
     //   • Native Wellfound → CloakBrowser (DataDome path — unchanged)
-    const isGreenhouseUrl = effectiveUrl.includes('greenhouse.io') || resolved.atsType === 'GREENHOUSE'
+    //
+    // Use ALL available signals — effectiveUrl may still be a startup.jobs URL if Scrapfly
+    // failed to resolve it, so fall back to the DB atsType and the original applyUrl.
+    const dbAtsType = await prisma.application.findUnique({
+      where: { id: applicationId },
+      include: { job: { select: { atsType: true } } },
+    }).then(a => a?.job?.atsType ?? null).catch(() => null)
+
+    const isGreenhouseUrl =
+      effectiveUrl.includes('greenhouse.io') ||
+      applyUrl.includes('greenhouse.io') ||
+      resolved.atsType === 'GREENHOUSE' ||
+      dbAtsType === 'GREENHOUSE'
+
     const isStartupJobsNative = effectiveUrl.includes('startup.jobs')
     const steelApiKey = process.env.STEEL_API_KEY
     const useSteel = !isGreenhouseUrl && !isNativeWellfound && !!steelApiKey
-    console.log(`[browserApply] ATS routing: ${resolved.atsType ?? 'unknown'} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
+    console.log(`[browserApply] ATS routing: db=${dbAtsType ?? 'unknown'} resolved=${resolved.atsType ?? '?'} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
     let context: import('playwright').BrowserContext
 
