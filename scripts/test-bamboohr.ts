@@ -46,6 +46,7 @@ const profile = {
   resumeBase64,
   resumeFilename: 'Nandan_Pullakandam_Resume.pdf',
   bio: "Software engineer with experience in TypeScript, Python, React, Next.js, and Node.js. Strong background in building full-stack applications and automation systems.",
+  addressZip: '28202',
   applicationPassword: 'Chiaro10346488!',
   wellfoundCookies: '',
   gender: 'Male' as const,
