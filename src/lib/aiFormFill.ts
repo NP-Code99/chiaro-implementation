@@ -273,6 +273,7 @@ export function fallbackFormMapping(
     let value = ''
 
     if (/first.*name|fname|given.*name/i.test(hint))              value = profile.firstName
+    else if (/preferred.*name|nickname/i.test(hint))               value = profile.firstName
     else if (/last.*name|lname|surname|family.*name/i.test(hint))  value = profile.lastName
     else if (/full.*name|your.*name(?!.*company)(?!.*school)|applicant.*name/i.test(hint)) value = `${profile.firstName} ${profile.lastName}`
     // Bare "name" field with no first/last/full qualifier — treat as full name
@@ -285,18 +286,21 @@ export function fallbackFormMapping(
     else if (/\bcity\b/i.test(hint))                               value = (profile.location ?? '').split(',')[0]?.trim() ?? ''
     else if (/\bstate\b|\bprovince\b/i.test(hint))                 value = (profile.location ?? '').split(',')[1]?.trim() ?? ''
     else if (/zip|postal/i.test(hint))                             value = profile.addressZip ?? ''
+    else if (/country.*time.*zone|time.*zone.*country|what.*country.*based|where.*based.*time/i.test(hint)) value = 'United States, Eastern Time (ET)'
     else if (/country/i.test(hint))                                value = 'United States'
     else if (/street|address.*line|address.*1/i.test(hint))        value = ''
     else if (/location|address/i.test(hint))                       value = profile.location ?? ''
     else if (/salary|compensation|\bpay\b|desired.*pay|expected.*pay/i.test(hint)) value = profile.desiredSalary
     else if (/year.*exp|experience.*year|how.*long.*experience/i.test(hint)) value = profile.yearsExp
+    else if (/how long.*remote|remote.*how long|100.*remote.*job/i.test(hint)) value = profile.yearsExp ? `${profile.yearsExp} years` : '2 years'
     else if (/current.*title|job.*title|position.*title/i.test(hint)) value = ''
+    else if (/current.*company|employer.*if.*applic|current.*employer/i.test(hint)) value = profile.currentCompany ?? ''
     else if (/current.*company|employer|organization/i.test(hint)) value = ''
     else if (/degree|education|major|school|university|college/i.test(hint)) value = ''
     else if (/skill|technolog|language|stack/i.test(hint))         value = ''
     else if (/sponsor|visa|h1b/i.test(hint))                       value = 'No'
     else if (/authoriz|eligible|work.*permit|legal.*work/i.test(hint)) value = 'Yes'
-    else if (/how.*hear|source|referral|where.*find/i.test(hint))  value = 'Other'
+    else if (/how.*hear|source|referral|where.*find|learn.*about.*opport/i.test(hint)) value = 'Startup.jobs'
     else if (/cover.*letter|motivation|why.*apply|why.*interest|tell.*us.*about|about.*yourself|introduce/i.test(hint)) {
       value = profile.bio && profile.bio.length > 20
         ? profile.bio

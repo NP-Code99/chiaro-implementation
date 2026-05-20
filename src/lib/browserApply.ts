@@ -2475,13 +2475,27 @@ export async function browserApply(
       // dropdown interaction below).  Skipping them here avoids a 10-minute CDP
       // keystroke-by-keystroke hang on every "N/A" typed into a hidden input.
       const isGreenhouse = page.url().includes('greenhouse.io')
-      // EEO fields (#gender, #hispanic_ethnicity, #veteran_status, #disability_status) are
-      // React Select dropdowns — typing text into them (page.fill) filters to "No options".
+      // EEO fields (#gender, #hispanic_ethnicity, #veteran_status, #disability_status, and
+      // numeric-ID variants like #4000681004 used by Grafana) are React Select dropdowns —
+      // typing text into them (page.fill) filters to "No options".
       // Skip them in the first pass; they're handled by the supplementary EEO section below.
       // Also skip #country — it's a React Select and handled by supplementary section 2 below.
-      const GH_EEO_SELECTORS = new Set(['#gender', '#hispanic_ethnicity', '#veteran_status', '#disability_status'])
+      // Also skip education dropdowns (#school--0, #degree--0) — React Select, handled below.
+      const GH_EEO_LABEL_RE = /gender.*identity|what.*gender|race\b|ethnicit|transgender|hispanic|veteran.*status|disability.*status/i
+      const GH_EEO_SELECTORS = new Set([
+        '#gender', '#hispanic_ethnicity', '#veteran_status', '#disability_status',
+        // Grafana / other companies use pure numeric IDs for EEO — detect them by label
+        ...rawFields
+          .filter(f => /^\d+$/.test(f.selector.replace(/^#/, '')) && GH_EEO_LABEL_RE.test(f.label ?? ''))
+          .map(f => f.selector),
+      ])
       const fieldsToFill = isGreenhouse
-        ? fillMapping.filter(f => !f.selector.includes('question_') && !GH_EEO_SELECTORS.has(f.selector) && f.selector !== '#country')
+        ? fillMapping.filter(f =>
+            !f.selector.includes('question_') &&
+            !GH_EEO_SELECTORS.has(f.selector) &&
+            f.selector !== '#country' &&
+            !/^#(school|degree)--\d+$/.test(f.selector)
+          )
         : fillMapping
       for (const field of fieldsToFill) {
         // Also apply any user-provided answers that override
@@ -2505,6 +2519,15 @@ export async function browserApply(
       if (isGreenhouse) {
         console.log('[browserApply] Greenhouse — supplementary React Select + checkbox fill')
         try {
+          // ── 1a-pre. Standard text fields that are sometimes missed by Claude mapping ──
+          // Fill #preferred_name (present on all new Greenhouse board forms) and other
+          // well-known fields that aren't covered by the question_ pattern below.
+          const prefNameEl = rawFields.find(f => f.selector === '#preferred_name')
+          if (prefNameEl) {
+            await page.fill('#preferred_name', profile.firstName, { timeout: 3000 }).catch(() => {})
+            console.log(`[browserApply] GH #preferred_name → "${profile.firstName}"`)
+          }
+
           // ── 1a. Plain-text question_ inputs (LinkedIn, GitHub, URL, salary, etc.) ──
           // Greenhouse renders some supplementary fields as plain text inputs (not React
           // Select). These are backed by question_* IDs but have inputType "text". We must
@@ -2540,9 +2563,12 @@ export async function browserApply(
             else if (/\bcity\b/i.test(hint))                                        directValue = profileCity
             else if (/state.*reside|reside.*state|which state|select.*state|state.*located/i.test(hint)) directValue = profileState
             else if (/\bstate\b|\bprovince\b/i.test(hint))                          directValue = profileState
+            else if (/current.*company|employer.*if.*applic|current.*employer/i.test(hint)) directValue = profile.currentCompany ?? ''
             else if (/current.*company|employer|organization/i.test(hint))          directValue = profile.currentCompany ?? 'N/A'
+            else if (/country.*time.*zone|time.*zone.*country|what.*country.*based|where.*based.*time/i.test(hint)) directValue = 'United States, Eastern Time (ET)'
+            else if (/how long.*remote|remote.*how long|100.*remote.*job/i.test(hint)) directValue = profile.yearsExp ? `${profile.yearsExp} years` : '2 years'
             else if (/npi\s*number/i.test(hint))                                    directValue = 'N/A'
-            else if (/how.*hear|source|referral|where.*find|learn.*about|first.*hear/i.test(hint)) directValue = 'Other'
+            else if (/how.*hear|source|referral|where.*find|learn.*about|first.*hear/i.test(hint)) directValue = 'Startup.jobs'
             // Behavioral / preference questions that are plain text inputs (not React Select)
             else if (/management.*style|style.*management|prefer.*supervisor|supervisor.*prefer/i.test(hint)) directValue = 'Collaborative and direct feedback'
             else if (/unexpected.*challenge|challenge.*approach|first.*approach.*challenge/i.test(hint))      directValue = 'Break it down into smaller pieces and collaborate with teammates'
@@ -2565,19 +2591,55 @@ export async function browserApply(
 
           // ── 1b. Dropdowns (React Select): click control → click option ─────────
           // Map each question_ text input to a target value using its label.
+          // Also handles education dropdowns (#school--N, #degree--N) and any
+          // numeric-ID React Select fields (Grafana EEO: #4000681004 etc.).
           // Note: field.tagName comes from Cheerio in lowercase ("input"), so compare
           // case-insensitively.
           for (const field of rawFields) {
             const hint = (field.label ?? '').toLowerCase()
             const sel = field.selector
 
-            // Only handle question_ text inputs (the ones backing React Select)
-            if (!sel.includes('question_') || field.tagName.toUpperCase() !== 'INPUT') continue
+            const isQuestionDropdown = sel.includes('question_')
+            const isEducationDropdown = /^#(school|degree)--\d+$/.test(sel)
+            // Numeric-ID React Select fields that are NOT in the EEO set (those are
+            // handled by section 5 below). Skip pure-EEO numeric IDs here.
+            const isNumericDropdown = /^#\d+$/.test(sel) && !GH_EEO_SELECTORS.has(sel)
+
+            // Only handle question_, education, or non-EEO numeric-ID inputs
+            if (!isQuestionDropdown && !isEducationDropdown && !isNumericDropdown) continue
+            if (field.tagName.toUpperCase() !== 'INPUT') continue
             if (field.inputType === 'checkbox' || field.inputType === 'radio') continue
 
             const profileStateDropdown = (profile.location ?? '').split(',')[1]?.trim() ?? ''
 
             let targetValue = ''
+
+            // ── Education dropdowns ─────────────────────────────────────────────
+            if (isEducationDropdown) {
+              if (/school/i.test(sel)) {
+                // Type university name to filter the autocomplete, then pick first result
+                const schoolName = profile.education?.split(',')[0]?.trim() ?? 'University of North Carolina'
+                const inputEl = page.locator(sel).first()
+                await inputEl.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+                await inputEl.click({ timeout: 2000 }).catch(() => {})
+                await inputEl.type(schoolName.slice(0, 12), { delay: 60 }).catch(() => {})
+                await page.waitForTimeout(800)
+                const firstOpt = page.locator('[role="option"], [class*="select__option"]').filter({ visible: true }).first()
+                if (await firstOpt.isVisible({ timeout: 1000 }).catch(() => false)) {
+                  await firstOpt.click({ force: true }).catch(() => {})
+                  console.log(`[browserApply] GH education school → first option`)
+                }
+                await page.keyboard.press('Escape').catch(() => {})
+                continue
+              }
+              if (/degree/i.test(sel)) targetValue = 'Bachelor'
+            }
+
+            if (targetValue) {
+              // Handle degree via normal dropdown path below
+            } else {
+
+            // ── Question_ and numeric-ID dropdown patterns ──────────────────────
             // IMPORTANT: Check "by submitting" FIRST — its long legal text contains
             // "interview engineer" and would false-match the "previously" pattern below.
             if (/submitting.*application.*represent|represent.*warrant.*penalty/i.test(hint))              targetValue = 'I Agree'
@@ -2590,10 +2652,13 @@ export async function browserApply(
             else if (/fluent.*english|english.*fluent|written.*spoken.*english/i.test(hint))              targetValue = 'Yes'
             else if (/year.*professional.*experience|year.*experience.*software/i.test(hint))             targetValue = '3-5 years'
             else if (/how.*many.*interview.*per.*week|interview.*per.*week|60.minute.*per.*week/i.test(hint)) targetValue = '5'
+            // "How did you hear" — Startup.jobs as source (Grafana and others use this as dropdown)
             else if (/how.*hear|source|referral|where.*find|learn.*about|first.*hear/i.test(hint))        targetValue = 'Other'
             else if (/sponsor|visa|h1b/i.test(hint))                                                      targetValue = 'No'
             else if (/authoriz|eligible|work.*permit|legal.*work/i.test(hint))                            targetValue = 'Yes'
             else if (/located.*follow.*countr|which.*countr.*located|countr.*you.*located/i.test(hint))   targetValue = 'Yes'
+            // "Are you based in the United States?" / "Do you currently reside in the US?" → Yes
+            else if (/based.*united states|reside.*united states|currently.*reside.*us|us.*resident/i.test(hint)) targetValue = 'Yes'
             else if (/country/i.test(hint))                                                               targetValue = 'United States'
             // State where you reside — try abbreviated then full name
             else if (/state.*reside|reside.*state|select.*state|which.*state|state.*located/i.test(hint)) targetValue = profileStateDropdown
@@ -2615,6 +2680,8 @@ export async function browserApply(
             else if (/ask.*ai.*tool|use.*ai.*tool|ai.*input.*feedback/i.test(hint))                      targetValue = 'Yes'
             // Medicaid / CAQH / NPI / clinical
             else if (/medicaid|caqh|enrolled/i.test(hint))                                                targetValue = 'No'
+
+            } // end else (non-education or non-degree path)
 
             // If no pattern matched AND the field is required, fall through to first-option picker below
             const hasPattern = !!targetValue
@@ -2877,17 +2944,38 @@ export async function browserApply(
             }
           }
 
-          // ── 5. EEO dropdowns (#gender, #hispanic_ethnicity, #veteran_status, #disability_status) ──
+          // ── 5. EEO dropdowns (#gender, #hispanic_ethnicity, #veteran_status, #disability_status,
+          //        plus Grafana numeric-ID fields: #4000681004, #4000682004, #4000691004) ──
           // These are React Select dropdowns. We must click the styled trigger div,
           // then pick an option from the listbox. Typing text directly causes "No options"
           // because React Select filters by typed text.
           await takeScreenshot(page, `phase-pre-eeo-${applicationId}`)
-          const EEO_FIELDS = [
+          const STANDARD_EEO: Array<{ id: string; preferred: string[] }> = [
             { id: 'gender',             preferred: ['decline', 'prefer not', "don't wish", 'not to say', 'not listed'] },
             { id: 'hispanic_ethnicity', preferred: ['decline', 'prefer not', "don't wish", 'not to say', 'no'] },
             { id: 'veteran_status',     preferred: ['not a protected', 'decline', 'prefer not', "don't wish", 'not to say'] },
             { id: 'disability_status',  preferred: ['no, i do not', 'do not have', 'decline', 'prefer not', "don't wish", 'not to say'] },
           ]
+          // Discover numeric-ID EEO fields by label (Grafana, and others that use similar patterns)
+          const NUMERIC_EEO_LABEL_MAP: Array<{ re: RegExp; preferred: string[] }> = [
+            { re: /gender.*identity|what.*gender/i,           preferred: ['decline', 'prefer not', 'not listed', 'non-binary'] },
+            { re: /\brace\b/i,                                preferred: ['decline', 'prefer not', 'not wish', 'not listed'] },
+            { re: /transgender/i,                             preferred: ['decline', 'prefer not', 'not wish', 'no'] },
+            { re: /hispanic|latino/i,                         preferred: ['decline', 'prefer not', 'not wish', 'no'] },
+            { re: /veteran/i,                                 preferred: ['not a protected', 'decline', 'prefer not', 'not to say'] },
+            { re: /disabilit/i,                               preferred: ['no, i do not', 'do not have', 'decline', 'prefer not'] },
+          ]
+          const numericEeoFields: Array<{ id: string; preferred: string[] }> = []
+          for (const rf of rawFields) {
+            // Only numeric IDs that are in the GH_EEO_SELECTORS set
+            if (!GH_EEO_SELECTORS.has(rf.selector)) continue
+            if (!/^#\d+$/.test(rf.selector)) continue  // already covered by STANDARD_EEO
+            const id = rf.selector.replace(/^#/, '')
+            const lbl = rf.label ?? ''
+            const match = NUMERIC_EEO_LABEL_MAP.find(m => m.re.test(lbl))
+            numericEeoFields.push({ id, preferred: match?.preferred ?? ['decline', 'prefer not', 'not to say'] })
+          }
+          const EEO_FIELDS = [...STANDARD_EEO, ...numericEeoFields]
           for (const eeoField of EEO_FIELDS) {
             const eeoEl = rawFields.find(f => f.selector === `#${eeoField.id}`)
             if (!eeoEl) continue
@@ -3600,7 +3688,7 @@ export async function browserApply(
                 const t = (el.textContent ?? '').trim()
                 if (t && t.length < 100) texts.push(t)
               })
-              return [...new Set(texts)]
+              return Array.from(new Set(texts))
             }).catch(() => [] as string[])
             console.log('[browserApply] GH submit blocked — form still showing. Errors:', ghErrors.slice(0, 5))
 
@@ -3656,7 +3744,7 @@ export async function browserApply(
 
             // Scroll to submit and resubmit
             await page.waitForTimeout(1000)
-            const ghResubmitSel = submitNativeSelector ?? '#submit_app'
+            const ghResubmitSel = foundAtsSelector ?? '#submit_app'
             const ghResubmitLoc = page.locator(ghResubmitSel).first()
             await ghResubmitLoc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {})
             await takeScreenshot(page, `pre-resubmit-${applicationId}`)
