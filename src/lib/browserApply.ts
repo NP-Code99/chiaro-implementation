@@ -2302,6 +2302,31 @@ export async function browserApply(
       // Greenhouse shows red field labels + inline error messages for unfilled required
       // fields. Detect them, re-fill, and resubmit once.
       const GH_ERROR_PATTERNS = [/please fill in/i, /required field/i, /field is required/i, /this field is required/i, /invalid email/i, /please enter/i, /select a country/i]
+      // Greenhouse server-side error shown when reCAPTCHA token is rejected or
+      // there is a transient server error. Retry submit once — reCAPTCHA execute()
+      // is called fresh on each submit click so a new valid token is obtained.
+      const GH_SERVER_ERROR = /there was an error processing your application/i
+      const hasServerError = GH_SERVER_ERROR.test(finalText) && page.url().includes('greenhouse.io')
+      if (hasServerError) {
+        console.log('[browserApply] GH server error after submit — waiting 4s and retrying once')
+        await page.waitForTimeout(4000)
+        const retrySel = await page.evaluate((): string | null => {
+          if (document.querySelector('#submit_app')) return '#submit_app'
+          const btn = document.querySelector('button[type="submit"]:not([disabled]), input[type="submit"]:not([disabled])')
+          return btn ? (btn.tagName === 'BUTTON' ? 'button[type="submit"]' : 'input[type="submit"]') : null
+        })
+        if (retrySel) {
+          const retryLoc = page.locator(retrySel).first()
+          await retryLoc.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {})
+          await page.waitForTimeout(1000)
+          await humanClick(page, retryLoc)
+          await page.waitForTimeout(5000)
+          screenshotUrl = await takeScreenshot(page, `retry-submitted-${applicationId}`)
+          finalText = await page.evaluate(() => document.body.innerText)
+          console.log('[browserApply] GH retry submitted')
+        }
+      }
+
       const hasValidationErrors = GH_ERROR_PATTERNS.some(p => p.test(finalText))
 
       if (hasValidationErrors && page.url().includes('greenhouse.io')) {
@@ -2419,11 +2444,12 @@ export async function browserApply(
       }
 
       // Greenhouse redirects back to the job listing page on success — no "thank you" page.
-      // Detect by: still on greenhouse.io URL + no validation error visible on page.
+      // Detect by: still on greenhouse.io URL + no validation error + no server error visible.
       const postSubmitUrl = page.url()
       if (
         (effectiveUrl.includes('greenhouse.io') || postSubmitUrl.includes('greenhouse.io')) &&
-        !GH_ERROR_PATTERNS.some(p => p.test(finalText))
+        !GH_ERROR_PATTERNS.some(p => p.test(finalText)) &&
+        !GH_SERVER_ERROR.test(finalText)
       ) {
         return { status: 'applied', applyUrl, screenshotUrl, preSubmitScreenshotUrl: preSubmitUrl, bypassMethod }
       }
