@@ -3561,11 +3561,35 @@ export async function browserApply(
               }
             }
           }
-          console.log('[browserApply] Re-filling fields post-reCAPTCHA solve')
+          // Post-CAPTCHA: only fill fields that are actually empty — do NOT re-fill
+          // already-correct values. Re-filling disrupts React Select dropdowns that
+          // were already set, causing required fields to appear blank on submission.
+          console.log('[browserApply] Post-reCAPTCHA: checking for empty required fields only')
           await Promise.race([
             (async () => {
               for (const field of fillMapping) {
                 const value = userAnswers[field.selector] ?? field.value
+                if (!value) continue
+
+                // Check current field value — skip if already filled
+                const currentVal = await page.evaluate((sel: string) => {
+                  const el = document.querySelector(sel) as HTMLInputElement | null
+                  if (!el) return null
+                  // For React Select, check the visible placeholder/value text
+                  const container = el.closest('[class*="select__"]') ?? el.parentElement?.closest('[class*="select__"]')
+                  if (container) {
+                    const singleVal = container.querySelector('[class*="select__single-value"]')
+                    if (singleVal?.textContent?.trim()) return singleVal.textContent.trim()
+                    const placeholder = container.querySelector('[class*="select__placeholder"]')
+                    if (placeholder?.textContent?.trim()) return '' // placeholder = empty
+                    return null // can't determine — skip for safety
+                  }
+                  return el.value ?? ''
+                }, field.selector).catch(() => null)
+
+                // Already has a value — skip it
+                if (currentVal && currentVal.trim().length > 0) continue
+
                 if (field.fieldType === 'text' || field.fieldType === 'textarea') {
                   const isBambooFabric = page.url().includes('bamboohr.com') && field.selector.match(/^#Fabric|^#fab-|^#FabricText|^#desiredPay|^#websiteUrl|^#linkedinUrl|^#customQuestion/i)
                   if (isBambooFabric) {
@@ -3579,6 +3603,7 @@ export async function browserApply(
                   } else {
                     await page.fill(field.selector, value, { timeout: 3000 }).catch(() => {})
                   }
+                  console.log(`[browserApply] Post-CAPTCHA filled empty field ${field.selector}`)
                 } else {
                   await Promise.race([
                     fillField(page, field.selector, value, field.fieldType, profile, tempFiles),
@@ -3587,15 +3612,19 @@ export async function browserApply(
                 }
               }
             })(),
-            new Promise<void>(r => setTimeout(r, 45_000)), // never block more than 45s total on re-fill
+            new Promise<void>(r => setTimeout(r, 45_000)),
           ])
 
-          // On Greenhouse, re-check checkboxes that reCAPTCHA solving may have reset
+          // Re-check checkboxes — they can be reset by reCAPTCHA page interactions
           if (page.url().includes('greenhouse.io')) {
-            const GH_CHECKBOX_PATTERNS = [/full.?stack/i, /back.?end/i, /front.?end/i, /system.?design/i, /complex.*code.*review/i]
+            const GH_CHECKBOX_ALWAYS = [
+              /privacy.*notice|candidate.*privacy|acknowledge.*privacy/i,
+              /\backnowledge\b/i, /\bconsent\b/i, /i agree|i accept/i,
+              /full.?stack/i, /back.?end/i, /front.?end/i, /system.?design/i,
+            ]
             for (const field of rawFields) {
               if (field.inputType !== 'checkbox') continue
-              if (GH_CHECKBOX_PATTERNS.some(pat => pat.test(field.label ?? ''))) {
+              if (GH_CHECKBOX_ALWAYS.some(pat => pat.test(field.label ?? ''))) {
                 await page.check(field.selector, { timeout: 3000 }).catch(() => {})
               }
             }
