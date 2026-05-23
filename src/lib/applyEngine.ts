@@ -77,7 +77,7 @@ function applyWithScrapfly(job: Job, profile: UserProfile): Promise<ApplicationR
             l.includes('APPLICATION FAILED') || l.includes('❌') || l.includes('spam')
           ) ?? ''
           resolve({
-            status: 'failed',
+            status: 'needs_review',
             errorMessage: errLine.slice(0, 300) || 'Orchestrator did not confirm submission',
             applyUrl,
           })

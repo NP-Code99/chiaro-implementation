@@ -40,7 +40,7 @@ async function processNext(): Promise<void> {
       await prisma.application.update({
         where: { id },
         data: {
-          status: ApplicationStatus.FAILED,
+          status: ApplicationStatus.NEEDS_REVIEW,
           errorMessage: 'Profile missing — complete your profile and retry.',
         },
       })
@@ -60,7 +60,7 @@ async function processNext(): Promise<void> {
     const nextStatus =
       result.status === 'applied'      ? ApplicationStatus.APPLIED
       : result.status === 'needs_review' ? ApplicationStatus.NEEDS_REVIEW
-      : ApplicationStatus.FAILED
+      : ApplicationStatus.NEEDS_REVIEW
 
     await prisma.application.update({
       where: { id },
@@ -82,7 +82,7 @@ async function processNext(): Promise<void> {
     try {
       await prisma.application.update({
         where: { id },
-        data: { status: ApplicationStatus.FAILED, errorMessage: msg },
+        data: { status: ApplicationStatus.NEEDS_REVIEW, errorMessage: msg },
       })
     } catch (dbErr) {
       console.error('[Queue] DB write failed:', dbErr)

@@ -121,7 +121,7 @@ async function processApplication(applicationId: string): Promise<void> {
     await prisma.application.update({
       where: { id: applicationId },
       data: {
-        status: ApplicationStatus.FAILED,
+        status: ApplicationStatus.NEEDS_REVIEW,
         errorMessage: 'User profile incomplete — please fill in your profile.',
       },
     })
@@ -151,7 +151,7 @@ async function processApplication(applicationId: string): Promise<void> {
     }
   }
 
-  let finalStatus: string = ApplicationStatus.FAILED
+  let finalStatus: string = ApplicationStatus.NEEDS_REVIEW
   if (result.success) {
     finalStatus = ApplicationStatus.APPLIED
   } else if (result.error === 'NEEDS_REVIEW') {

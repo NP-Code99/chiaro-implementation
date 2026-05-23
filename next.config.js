@@ -13,6 +13,8 @@ const nextConfig = {
       'puppeteer-extra',
       'clone-deep',
       'merge-deep',
+      'googleapis',
+      'google-auth-library',
     ],
   },
   webpack: (config, { isServer }) => {
@@ -28,6 +30,11 @@ const nextConfig = {
         'clone-deep',
         'merge-deep',
         'scrapfly-sdk',
+        'googleapis',
+        'google-auth-library',
+        'gaxios',
+        'gcp-metadata',
+        'google-logging-utils',
       ]
       config.externals = [
         ...(Array.isArray(config.externals) ? config.externals : [config.externals].filter(Boolean)),

@@ -10,7 +10,7 @@ import * as path from 'path'
 import type { UserProfile } from './userProfile'
 import type { ApplicationResult } from './applyEngine'
 import { extractResumeText } from './resumeParser'
-import { claudeFormMapping, fallbackFormMapping } from './aiFormFill'
+import { claudeFormMapping, fallbackFormMapping, generateFieldAnswer } from './aiFormFill'
 import { fillApplicationForm } from './formFiller'
 import { prisma } from './db'
 import { ApplicationStatus } from '@/lib/prismaEnums'
@@ -19,8 +19,10 @@ import { extractFieldsFromHtml } from './scrapflyFormExtract'
 import { solveTurnstile, solveDataDome, solveCloudflareChallenge, solveCloudflareInteractivePage, solveRecaptchaV2, solveRecaptchaV3, solveRecaptchaEnterprise } from './capsolver'
 import { resolveApplyUrl } from './extractAtsUrl'
 import { scrapflyApplyWellfound } from './scrapflyApply'
+import { createOutcomeLogger, type OutcomeLogger, type FieldType } from './outcomeLogger'
+import { getVerificationCode, syncGmailInbox } from './gmail/inboxSync'
 
-const TOTAL_TIMEOUT_MS = 600_000  // 10 min — warm-up (homepage→jobs→job page) + CF/DataDome + form fill
+const TOTAL_TIMEOUT_MS = 300_000  // 5 min — warm-up (homepage→jobs→job page) + CF/DataDome + form fill
 const MAX_STEPS = 8
 
 
@@ -405,6 +407,88 @@ function getBrokenJobMessage(code: string, company: string): string {
   return messages[code] ?? `Could not submit application to ${company}. Please apply manually.`
 }
 
+// ── Gmail-driven auto-verify (Greenhouse email code) ──────────────────────────
+//
+// Pulls the verification code from the user's connected Gmail inbox, types it
+// into the visible challenge input, and submits. Fully fail-safe: any error
+// returns { submitted: false } so the caller can fall back to manual entry.
+// Does not touch any captcha/bypass code paths.
+
+async function tryGreenhouseAutoVerify(
+  applicationId: string,
+  page: import('playwright').Page,
+): Promise<{ code: string; submitted: boolean } | null> {
+  const app = await prisma.application.findUnique({
+    where: { id: applicationId },
+    select: { userId: true },
+  })
+  if (!app?.userId) return null
+
+  // Kick off a sync immediately so we don't have to wait for the next 5-min cron
+  await syncGmailInbox(app.userId).catch(() => { /* sync errors handled in getVerificationCode */ })
+
+  const code = await getVerificationCode(app.userId, 'greenhouse', { maxWaitMs: 60_000 })
+  if (!code) return null
+
+  console.log(`[browserApply] Retrieved Greenhouse verification code from Gmail (${code.length} chars)`)
+
+  // Try a small set of selectors for the verification input. Greenhouse uses a
+  // single text input on the verification page.
+  const selectors = [
+    'input[autocomplete="one-time-code"]',
+    'input[name*="verification" i]',
+    'input[id*="verification" i]',
+    'input[name*="code" i]',
+    'input[id*="code" i]',
+    'input[maxlength="8"]',
+    'input[type="text"]',
+  ]
+
+  let typed = false
+  for (const sel of selectors) {
+    const input = page.locator(sel).first()
+    if (await input.count().catch(() => 0) === 0) continue
+    try {
+      await input.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+      await input.click({ timeout: 3000 }).catch(() => {})
+      await input.fill('', { timeout: 2000 }).catch(() => {})
+      await input.type(code, { delay: 60, timeout: 5000 })
+      typed = true
+      break
+    } catch {
+      continue
+    }
+  }
+
+  if (!typed) {
+    console.warn('[browserApply] Could not find Greenhouse verification input')
+    return { code, submitted: false }
+  }
+
+  // Click any visible submit button
+  const submitSelectors = [
+    'button[type="submit"]',
+    'input[type="submit"]',
+    'button:has-text("Verify")',
+    'button:has-text("Submit")',
+    'button:has-text("Confirm")',
+    'button:has-text("Continue")',
+  ]
+  for (const sel of submitSelectors) {
+    const btn = page.locator(sel).first()
+    if (await btn.count().catch(() => 0) === 0) continue
+    try {
+      await btn.click({ timeout: 3000 })
+      break
+    } catch {
+      continue
+    }
+  }
+
+  await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+  return { code, submitted: true }
+}
+
 // ── Broken job skip handler ───────────────────────────────────────────────────
 
 async function handleBrokenJobPosting(
@@ -507,6 +591,9 @@ export async function browserApply(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let browser: any = null
   let steelSessionId: string | null = null
+  let steelViewUrl: string | null = null
+  let outcomeLogger: OutcomeLogger | null = null
+  const applyStartedAt = new Date()
 
   const run = async (): Promise<BrowserApplyResult> => {
 
@@ -751,6 +838,15 @@ export async function browserApply(
     const useSteel = !isGreenhouseUrl && !isNativeWellfound && !isLeverUrl && !!steelApiKey
     console.log(`[browserApply] ATS routing: db=${dbAtsType ?? 'unknown'} resolved=${resolved.atsType ?? '?'} lever=${isLeverUrl} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
+    // Create outcome logger now that ATS type is known
+    const resolvedAtsType = dbAtsType ?? (
+      isGreenhouseUrl ? 'GREENHOUSE' :
+      isLeverUrl      ? 'LEVER' :
+      isNativeWellfound ? 'WELLFOUND_NATIVE' :
+      resolved.atsType ?? 'UNKNOWN'
+    )
+    outcomeLogger = createOutcomeLogger(applicationId, resolvedAtsType)
+
     let context: import('playwright').BrowserContext
 
     if (useSteel) {
@@ -759,10 +855,11 @@ export async function browserApply(
       const session = await steel.sessions.create({
         useProxy: true,      // Steel's built-in residential proxy pool
         solveCaptcha: true,  // auto-solve Cloudflare Turnstile
-        timeout: 600000,     // 10 min — CF bypass alone can take 80s
+        timeout: 420000,     // 7 min — CF bypass alone can take 80s
       })
       console.log('[browserApply] Steel: useProxy=true + solveCaptcha=true')
       steelSessionId = session.id
+      steelViewUrl = ((session as unknown) as Record<string, unknown>).viewUrl as string ?? null
       bypassMethod = 'steel'
       console.log(`[browserApply] Steel session created: ${steelSessionId}`)
 
@@ -2265,6 +2362,21 @@ export async function browserApply(
         }
       }
 
+      // Log native Wellfound field outcomes derived from fillResult
+      if (outcomeLogger) {
+        const failedSet = new Set(fillResult.unfilledFields ?? [])
+        for (const rf of rawFields) {
+          const label = rf.label ?? rf.selector
+          outcomeLogger.logField({
+            fieldLabel: label,
+            fieldType: (rf.inputType ?? 'unknown') as FieldType,
+            status: failedSet.has(label) ? 'FAILED' : 'FILLED',
+            selector: rf.selector,
+            pageSection: 'personal_info',
+          })
+        }
+      }
+
       if (!fillResult.success) {
         const screenshotUrl = await takeScreenshot(page, applicationId)
         await prisma.application.update({ where: { id: applicationId }, data: { bypassMethod } }).catch(() => {})
@@ -2486,7 +2598,11 @@ export async function browserApply(
             const phoneLoc = page.locator('#phone').first()
             await phoneLoc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {})
             await phoneLoc.click({ timeout: 2000 }).catch(() => {})
-            await phoneLoc.fill(profile.phone ?? '', { timeout: 3000 }).catch(() => {})
+            await phoneLoc.fill('', { timeout: 2000 }).catch(() => {})
+            await phoneLoc.pressSequentially(profile.phone ?? '', { delay: 30 }).catch(async () => {
+              await phoneLoc.fill(profile.phone ?? '', { timeout: 3000 }).catch(() => {})
+            })
+            await phoneLoc.press('Tab').catch(() => {})
           }
         }
 
@@ -2595,16 +2711,62 @@ export async function browserApply(
             !/^#(school|degree)--\d+$/.test(f.selector)
           )
         : fillMapping
+      // Build selector→label map from rawFields so we can annotate FilledField rows
+      const rawLabelBySelector = new Map<string, string>(
+        rawFields.filter((rf): rf is import('./browserApply').FieldDescriptor => rf !== null)
+          .map(rf => [rf.selector, rf.label ?? rf.selector])
+      )
+      const filledSelectors = new Set<string>()
       for (const field of fieldsToFill) {
         // Also apply any user-provided answers that override
         const value = userAnswers[field.selector] ?? field.value
         console.log(`[browserApply] Filling field: ${field.selector} (${field.fieldType}) = "${value.slice(0, 40)}"`)
         await fillField(page, field.selector, value, field.fieldType, profile, tempFiles)
+        filledSelectors.add(field.selector)
+        outcomeLogger?.logField({
+          fieldLabel: rawLabelBySelector.get(field.selector) ?? field.selector,
+          fieldType: (field.fieldType ?? 'unknown') as FieldType,
+          status: 'FILLED',
+          filledValue: value,
+          selector: field.selector,
+        })
       }
+      // Log fields that were detected but not in the fill mapping (skipped)
+      rawFields
+        .filter((rf): rf is import('./browserApply').FieldDescriptor => rf !== null)
+        .forEach(rf => {
+          if (!filledSelectors.has(rf.selector)) {
+            outcomeLogger?.logField({
+              fieldLabel: rf.label ?? rf.selector,
+              fieldType: (rf.inputType ?? 'unknown') as FieldType,
+              status: 'SKIPPED',
+              selector: rf.selector,
+              skipReason: 'not_in_fill_mapping',
+            })
+          }
+        })
 
       if (isGreenhouse) {
         await takeScreenshot(page, `phase-post-basic-fill-${applicationId}`)
       }
+
+      // Safe checkbox helper — hoisted here so both section 4 (GH supplementary fill)
+      // and the post-CAPTCHA re-check section can use it.
+      // CSS selectors with [] chars (e.g. #question_123[]_456) are invalid CSS but
+      // valid as attribute selectors [id="..."]. This handles both cases.
+      const safeCheckbox = async (sel: string): Promise<void> => {
+        const id = sel.replace(/^#/, '')
+        const loc = (sel.includes('[') || sel.includes(']'))
+          ? page.locator(`[id="${id}"]`)
+          : page.locator(sel)
+        await loc.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+        await loc.check({ timeout: 3000 }).catch(async () => {
+          await page.locator(`label[for="${id}"]`).click({ timeout: 2000 }).catch(async () => {
+            await loc.click({ timeout: 2000, force: true }).catch(() => {})
+          })
+        })
+      }
+
 
       // ── Greenhouse new board supplementary fill ──────────────────────────────
       // job-boards.greenhouse.io uses React Select for question_* dropdowns.
@@ -2630,6 +2792,8 @@ export async function browserApply(
           // Greenhouse renders some supplementary fields as plain text inputs (not React
           // Select). These are backed by question_* IDs but have inputType "text". We must
           // fill them directly with page.fill() before trying the dropdown path.
+          // Track which selectors we fill here so section 1b can skip them.
+          const section1aFilled = new Set<string>()
           for (const field of rawFields) {
             const hint = (field.label ?? '').toLowerCase()
             const sel = field.selector
@@ -2659,6 +2823,7 @@ export async function browserApply(
             else if (/portfolio|personal.*site|website/i.test(hint))               directValue = profile.github ?? ''
             else if (/salary|compensation|desired.*pay|expected.*pay|salary.*expect/i.test(hint)) directValue = profile.desiredSalary ?? ''
             else if (/\bcity\b/i.test(hint))                                        directValue = profileCity
+            else if (/\bcountry\b/i.test(hint))                                     directValue = 'United States'
             else if (/state.*reside|reside.*state|which state|select.*state|state.*located/i.test(hint)) directValue = profileState
             else if (/\bstate\b|\bprovince\b/i.test(hint))                          directValue = profileState
             // Current employer — match "Current (Most Recent) Employer" and similar
@@ -2674,8 +2839,8 @@ export async function browserApply(
             else if (/non.?compete|non.?solicit|restrictive.*covenant/i.test(hint)) directValue = 'No'
             // Relatives / family members employed at the company
             else if (/relative|family.*member.*employ|employ.*relative|friend.*employ/i.test(hint)) directValue = 'No'
-            // Previously employed / worked at this company
-            else if (/previously.*employ|been.*employ|prior.*employ|former.*employ/i.test(hint))    directValue = 'No'
+            // Previously employed / worked at this company — covers "Have you ever worked for X before?"
+            else if (/previously.*employ|been.*employ|prior.*employ|former.*employ|ever.*work.*for|worked.*for.*before|ever.*been.*employ/i.test(hint)) directValue = 'No'
             // Previously interviewed at this company
             else if (/previously.*interview|interview.*process.*before|gone.*through.*interview/i.test(hint)) directValue = 'No'
             // Behavioral / preference questions that are plain text inputs (not React Select)
@@ -2693,8 +2858,37 @@ export async function browserApply(
             // Medicaid / CAQH / NPI / clinical checks — fallback to "No" / "N/A"
             else if (/medicaid|caqh|enrolled|enrollment/i.test(hint))               directValue = 'No'
 
+            // No pattern matched — use Claude to answer required open-ended questions
+            if (!directValue && field.required && (field.inputType === 'text' || field.tagName.toUpperCase() === 'TEXTAREA')) {
+              const fieldType = field.tagName.toUpperCase() === 'TEXTAREA' ? 'textarea' : 'text'
+              // Skip very short labels (city/state/zip type fields) — Claude won't improve these
+              if (hint.length > 5 && fieldType === 'textarea') {
+                directValue = await generateFieldAnswer(
+                  field.label ?? hint,
+                  resumeText,
+                  job.description,
+                  job.role || 'Software Engineer',
+                  job.company || new URL(page.url()).hostname,
+                  profile,
+                ).catch(() => '')
+                if (directValue) console.log(`[browserApply] GH Claude answer for "${hint.slice(0, 40)}" → "${directValue.slice(0, 80)}"`)
+              } else if (hint.length > 10) {
+                // Text fields with longer labels might be open-ended too (not just city/zip)
+                directValue = await generateFieldAnswer(
+                  field.label ?? hint,
+                  resumeText,
+                  job.description,
+                  job.role || 'Software Engineer',
+                  job.company || new URL(page.url()).hostname,
+                  profile,
+                ).catch(() => '')
+                if (directValue) console.log(`[browserApply] GH Claude answer for "${hint.slice(0, 40)}" → "${directValue.slice(0, 80)}"`)
+              }
+            }
+
             if (!directValue) continue
             await page.fill(sel, directValue, { timeout: 3000 }).catch(() => {})
+            section1aFilled.add(sel)
             console.log(`[browserApply] GH plain-text question "${hint.slice(0, 40)}" → "${directValue.slice(0, 60)}"`)
           }
 
@@ -2707,6 +2901,9 @@ export async function browserApply(
           for (const field of rawFields) {
             const hint = (field.label ?? '').toLowerCase()
             const sel = field.selector
+
+            // Skip fields already filled as plain text in section 1a — they are not React Selects
+            if (section1aFilled.has(sel)) continue
 
             const isQuestionDropdown = sel.includes('question_')
             const isEducationDropdown = /^#(school|degree)--\d+$/.test(sel)
@@ -2779,8 +2976,8 @@ export async function browserApply(
             else if (/non.?compete|non.?solicit|restrictive.*covenant/i.test(hint))                       targetValue = 'No'
             // Relatives / family members employed at the company
             else if (/relative|family.*member.*employ|employ.*relative/i.test(hint))                      targetValue = 'No'
-            // Previously employed or interviewed at this company
-            else if (/previously.*employ|been.*employ|prior.*employ|former.*employ/i.test(hint))          targetValue = 'No'
+            // Previously employed or interviewed at this company — also covers "Have you ever worked for X before?"
+            else if (/previously.*employ|been.*employ|prior.*employ|former.*employ|ever.*work.*for|worked.*for.*before|ever.*been.*employ/i.test(hint)) targetValue = 'No'
             else if (/previously.*interview|interview.*process.*before|gone.*through.*interview/i.test(hint)) targetValue = 'No'
             // Prior/current employer checks
             else if (/alphabet|google.*employee|employee.*alphabet|contractor.*alphabet/i.test(hint))     targetValue = 'No'
@@ -3029,8 +3226,10 @@ export async function browserApply(
           }
 
           // ── 3. Phone country code (intl-tel-input) ────────────────────────────
-          // Set the flag/dial-code prefix to US (+1) via the iti JS API if available,
-          // otherwise skip (Steel defaults to US in US datacenters).
+          // Set the flag/dial-code prefix to US (+1) via the iti JS API if available.
+          // NOTE: setCountry() and/or clicking the iti country picker (which can happen
+          // if section 2's country React Select click accidentally opens the iti dropdown)
+          // may clear the phone input value. Always re-fill the phone after this step.
           await page.evaluate(() => {
             try {
               const phoneEl = document.getElementById('phone') as HTMLInputElement | null
@@ -3040,13 +3239,27 @@ export async function browserApply(
               if (iti) iti.setCountry('us')
             } catch { /* ignore */ }
           }).catch(() => {})
+          // Re-fill phone after iti country change (setCountry or picker interaction may clear it).
+          if (profile.phone) {
+            const phoneReLoc = page.locator('#phone').first()
+            await phoneReLoc.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+            await phoneReLoc.click({ timeout: 2000 }).catch(() => {})
+            await phoneReLoc.fill('', { timeout: 2000 }).catch(() => {})
+            await phoneReLoc.pressSequentially(profile.phone, { delay: 30 }).catch(async () => {
+              await phoneReLoc.fill(profile.phone!, { timeout: 3000 }).catch(() => {})
+            })
+            await phoneReLoc.press('Tab').catch(() => {})
+            const phoneVal = await phoneReLoc.inputValue().catch(() => '')
+            console.log(`[browserApply] GH phone refill → "${phoneVal}"`)
+          }
 
-          // ── 4. Checkboxes: privacy/consent notices (always check) + technical skills ──
+          // ── 4. Checkboxes: check ALL required + pattern-matched consent/skill boxes ──
+          // Required checkboxes (red star) must ALWAYS be checked — they block submission.
+          // Also check any consent/acknowledgement/skill boxes identified by label patterns.
           await page.keyboard.press('Escape').catch(() => {})
           const CHECKBOX_ALWAYS_CHECK = [
-            // Privacy notices, candidate notices, consent, acknowledgements — always required
             /privacy.*notice|candidate.*privacy|acknowledge.*privacy/i,
-            /\backnowledge\b/i,
+            /\backnowledge/i,      // matches "Acknowledged", "Acknowledge", etc. (no trailing \b)
             /\bconsent\b/i,
             /i agree|i accept|i confirm/i,
             /terms.*condition|condition.*employment/i,
@@ -3062,15 +3275,13 @@ export async function browserApply(
           for (const field of rawFields) {
             if (field.inputType !== 'checkbox') continue
             const label = (field.label ?? '')
+            // Check if required (red asterisk) OR matches a known consent/skill pattern
             const shouldCheck =
+              field.required === true ||
               CHECKBOX_ALWAYS_CHECK.some(pat => pat.test(label)) ||
               CHECKBOX_SKILL_CHECK.some(pat => pat.test(label))
             if (shouldCheck) {
-              await page.check(field.selector, { timeout: 3000 }).catch(async () => {
-                // Fallback: click the label associated with the checkbox
-                const checkId = field.selector.replace(/^#/, '')
-                await page.locator(`label[for="${checkId}"]`).click({ timeout: 2000 }).catch(() => {})
-              })
+              await safeCheckbox(field.selector)
               console.log(`[browserApply] GH checkbox checked: "${field.label}"`)
             }
           }
@@ -3632,8 +3843,10 @@ export async function browserApply(
             }, sel).catch(() => null)
           }
 
-          // Helper: pick a value from an open-able React Select via label[for="X"] + div click
-          const pickReactSelectPostCaptcha = async (sel: string, targetValue: string): Promise<void> => {
+          // Helper: pick a value from an open-able React Select via label[for="X"] + div click.
+          // Returns true if an option was selected, false if the field is actually plain text
+          // (no listbox appeared) — caller can then fall back to page.fill().
+          const pickReactSelectPostCaptcha = async (sel: string, targetValue: string): Promise<boolean> => {
             const inputId = sel.replace(/^#/, '')
             await page.keyboard.press('Escape').catch(() => {})
             await page.waitForTimeout(150)
@@ -3651,7 +3864,7 @@ export async function browserApply(
             ).first()
             if (!await listbox.isVisible({ timeout: 1500 }).catch(() => false)) {
               await page.keyboard.press('Escape').catch(() => {})
-              return
+              return false // not a React Select — caller should use page.fill()
             }
 
             const opts = await listbox.locator('[role="option"],li').all()
@@ -3704,6 +3917,7 @@ export async function browserApply(
               await page.keyboard.press('Escape').catch(() => {})
             }
             await page.waitForTimeout(300)
+            return !!selected
           }
 
           await Promise.race([
@@ -3725,7 +3939,11 @@ export async function browserApply(
                 )
 
                 if (isGhReactSelect) {
-                  await pickReactSelectPostCaptcha(field.selector, value)
+                  const picked = await pickReactSelectPostCaptcha(field.selector, value)
+                  if (!picked) {
+                    // Not a React Select (no listbox appeared) — fill as plain text
+                    await page.fill(field.selector, value, { timeout: 3000 }).catch(() => {})
+                  }
                   console.log(`[browserApply] Post-CAPTCHA filled empty field ${field.selector}`)
                 } else if (field.fieldType === 'text' || field.fieldType === 'textarea') {
                   const isBambooFabric = page.url().includes('bamboohr.com') && field.selector.match(/^#Fabric|^#fab-|^#FabricText|^#desiredPay|^#websiteUrl|^#linkedinUrl|^#customQuestion/i)
@@ -3752,17 +3970,19 @@ export async function browserApply(
             new Promise<void>(r => setTimeout(r, 45_000)),
           ])
 
-          // Re-check checkboxes — they can be reset by reCAPTCHA page interactions
+          // Re-check checkboxes — they can be reset by reCAPTCHA page interactions.
+          // Re-uses safeCheckbox which handles [] selector special chars.
           if (isGhUrl(page.url())) {
             const GH_CHECKBOX_ALWAYS = [
               /privacy.*notice|candidate.*privacy|acknowledge.*privacy/i,
-              /\backnowledge\b/i, /\bconsent\b/i, /i agree|i accept/i,
+              /\backnowledge/i, /\bconsent\b/i, /i agree|i accept/i,
               /full.?stack/i, /back.?end/i, /front.?end/i, /system.?design/i,
             ]
             for (const field of rawFields) {
               if (field.inputType !== 'checkbox') continue
-              if (GH_CHECKBOX_ALWAYS.some(pat => pat.test(field.label ?? ''))) {
-                await page.check(field.selector, { timeout: 3000 }).catch(() => {})
+              // Re-check required checkboxes and pattern-matched ones
+              if (field.required === true || GH_CHECKBOX_ALWAYS.some(pat => pat.test(field.label ?? ''))) {
+                await safeCheckbox(field.selector)
               }
             }
             console.log('[browserApply] GH post-CAPTCHA: checkboxes re-checked')
@@ -3938,17 +4158,44 @@ export async function browserApply(
         }
 
         // Greenhouse email verification challenge — triggered on submit when reCAPTCHA score
-        // is low or as standard email confirmation.  The user must enter the 8-char code
-        // from their email inbox to complete submission.
+        // is low or as standard email confirmation. Try to auto-resolve via the user's
+        // connected Gmail inbox before falling back to manual entry.
         if (/verification code was sent|enter the 8.character code|security code/i.test(finalText)) {
-          console.log('[browserApply] Greenhouse email verification required — user must enter code from inbox')
-          return {
-            status: 'needs_review',
-            errorMessage: 'Greenhouse sent a verification code to your email — enter it to complete submission',
-            applyUrl,
-            screenshotUrl: postSubmitUrl,
-            preSubmitScreenshotUrl: preSubmitUrl,
-            bypassMethod,
+          console.log('[browserApply] Greenhouse email verification required — attempting Gmail auto-retrieval')
+
+          const autoCode = await tryGreenhouseAutoVerify(applicationId, page).catch((err: unknown) => {
+            console.warn('[browserApply] Greenhouse auto-verify threw:', err instanceof Error ? err.message : String(err))
+            return null
+          })
+
+          if (autoCode?.submitted) {
+            console.log('[browserApply] Greenhouse verification auto-completed via Gmail code')
+            // Re-check the page — if we moved past the challenge, treat as success
+            const afterText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '')
+            const stillChallenged = /verification code was sent|enter the 8.character code|security code/i.test(afterText)
+            if (!stillChallenged) {
+              // Fall through to standard success detection below
+            } else {
+              return {
+                status: 'needs_review',
+                errorMessage: `Auto-retrieved code ${autoCode.code} but Greenhouse still showing challenge — please verify manually`,
+                applyUrl,
+                screenshotUrl: postSubmitUrl,
+                preSubmitScreenshotUrl: preSubmitUrl,
+                bypassMethod,
+              }
+            }
+          } else {
+            return {
+              status: 'needs_review',
+              errorMessage: autoCode?.code
+                ? `Greenhouse verification required — code ${autoCode.code} retrieved from Gmail but could not be auto-submitted`
+                : 'Greenhouse sent a verification code to your email — connect Gmail or enter the code to complete submission',
+              applyUrl,
+              screenshotUrl: postSubmitUrl,
+              preSubmitScreenshotUrl: preSubmitUrl,
+              bypassMethod,
+            }
           }
         }
 
@@ -4171,19 +4418,20 @@ export async function browserApply(
     }
   }
 
+  let result: BrowserApplyResult = { status: 'needs_review', errorMessage: 'Unknown error', applyUrl }
   try {
-    return await Promise.race([
+    result = await Promise.race([
       run(),
       new Promise<BrowserApplyResult>(resolve =>
         setTimeout(
-          () => resolve({ status: 'needs_review', errorMessage: 'Timed out after 10 minutes', applyUrl }),
+          () => resolve({ status: 'needs_review', errorMessage: 'Timed out after 5 minutes', applyUrl }),
           TOTAL_TIMEOUT_MS,
         )
       ),
     ])
   } catch (err) {
-    return {
-      status: 'failed',
+    result = {
+      status: 'needs_review',
       errorMessage: err instanceof Error ? err.message.split('\n')[0] : 'Browser error',
       applyUrl,
     }
@@ -4197,4 +4445,32 @@ export async function browserApply(
       try { fs.unlinkSync(f) } catch { /* ignore */ }
     }
   }
+
+  // Flush outcome log — runs after browser/session are already cleaned up.
+  // TS narrowing loses track of mutations made inside the run() closure, so we
+  // snapshot outcomeLogger into a typed alias before the if-check.
+  const _logger = outcomeLogger as OutcomeLogger | null
+  if (_logger) {
+    const overallStatus = ((): import('./outcomeLogger').OverallStatus => {
+      if (result.status === 'applied') return 'SUCCESS'
+      if (result.status === 'failed') return 'FAILED'
+      const msg = result.errorMessage ?? ''
+      if (/verification code|enter the 8.character/i.test(msg)) return 'VERIFICATION_REQUIRED'
+      if (/captcha|datadome|cloudflare|hcaptcha/i.test(msg)) return 'CAPTCHA_BLOCKED'
+      if (/already applied|already submitted/i.test(msg)) return 'ALREADY_APPLIED'
+      if (result.bypassMethod === 'failed') return 'FAILED'
+      return 'PARTIAL'
+    })()
+    await _logger.flush({
+      overallStatus,
+      submitSucceeded: result.status === 'applied',
+      steelSessionId,
+      steelViewUrl,
+      bypassMethod: result.bypassMethod ?? null,
+      durationMs: Date.now() - applyStartedAt.getTime(),
+      errorMessage: result.errorMessage ?? null,
+    })
+  }
+
+  return result
 }

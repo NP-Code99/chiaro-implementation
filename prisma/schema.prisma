@@ -79,7 +79,8 @@ model Application {
   job             Job      @relation(fields: [jobId], references: [id])
 
   @@unique([userId, jobId])
-  pausedApplication PausedApplication?
+  pausedApplication  PausedApplication?
+  applicationOutcome ApplicationOutcome?
 }
 
 model PausedApplication {
@@ -92,4 +93,106 @@ model PausedApplication {
   createdAt        DateTime    @default(now())
   updatedAt        DateTime    @updatedAt
   application      Application @relation(fields: [applicationId], references: [id])
+}
+
+// ── Outcome logging for training loop ─────────────────────────────────────────
+
+model ApplicationOutcome {
+  id              String        @id @default(cuid())
+  applicationId   String        @unique
+  application     Application   @relation(fields: [applicationId], references: [id])
+
+  // Steel session correlation
+  steelSessionId  String?
+  steelViewUrl    String?
+
+  // Result
+  overallStatus   String        // SUCCESS | PARTIAL | FAILED | CAPTCHA_BLOCKED | VERIFICATION_REQUIRED | ALREADY_APPLIED
+  submitSucceeded Boolean       @default(false)
+  atsType         String        // GREENHOUSE | LEVER | WORKDAY | BAMBOOHR | ASHBY | SMARTRECRUITERS | etc.
+  bypassMethod    String?       // steel | steel_plus_capsolver | cloak_browser | scrapfly_only | etc.
+
+  // Timing
+  durationMs      Int?
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  // Error detail
+  errorMessage    String?
+  errorCode       String?
+
+  // Aggregate counts derived from FieldOutcome rows (denormalized for quick queries)
+  fieldsFilled    Int           @default(0)
+  fieldsSkipped   Int           @default(0)
+  fieldsFailed    Int           @default(0)
+
+  createdAt       DateTime      @default(now())
+  fieldOutcomes   FieldOutcome[]
+}
+
+model FieldOutcome {
+  id              String             @id @default(cuid())
+  outcomeId       String
+  outcome         ApplicationOutcome @relation(fields: [outcomeId], references: [id])
+
+  // Field identity
+  fieldLabel      String             // human-readable label ("First Name", "LinkedIn URL", etc.)
+  fieldName       String?            // name= or id= attribute if available
+  fieldType       String             // text | textarea | select | checkbox | radio | file | date | unknown
+  selector        String?            // CSS selector used (for debugging / pattern extraction)
+  pageSection     String?            // personal_info | work_experience | education | custom_questions | resume | etc.
+
+  // What happened
+  status          String             // FILLED | SKIPPED | FAILED | PRE_FILLED | BLOCKED
+  filledValue     String?            // what we actually wrote/selected (truncated to 500 chars)
+  skipReason      String?            // why skipped: no_profile_data | already_filled | not_required | unknown
+  errorMessage    String?
+
+  // ATS context (denormalized for fast per-ATS queries)
+  atsType         String
+
+  createdAt       DateTime           @default(now())
+}
+
+// ── Gmail inbox connection (OAuth) ────────────────────────────────────────────
+
+model GmailConnection {
+  id           String    @id @default(cuid())
+  userId       String    @unique
+  gmailAddress String
+
+  // AES-256-CBC encrypted via lib/sessionManager.ts (ENCRYPTION_KEY env var)
+  accessToken  String
+  refreshToken String
+  tokenExpiry  DateTime
+
+  connectedAt  DateTime  @default(now())
+  lastSyncedAt DateTime?
+  isActive     Boolean   @default(true)
+}
+
+model InboxEmail {
+  id               String   @id @default(cuid())
+  userId           String
+  gmailMessageId   String   @unique
+  threadId         String
+  fromAddress      String
+  fromName         String   @default("")
+  subject          String
+  receivedAt       DateTime
+  snippet          String
+  fullBody         String
+
+  // verification_code | interview | offer | rejection | application_confirm | other
+  emailCategory    String
+
+  verificationCode String?   // Extracted code if emailCategory is verification_code
+  isRead           Boolean   @default(false)
+  companyName      String?
+  applicationId    String?   // FK to Application if matchable
+
+  createdAt        DateTime  @default(now())
+
+  @@index([userId, receivedAt])
+  @@index([userId, emailCategory])
 }

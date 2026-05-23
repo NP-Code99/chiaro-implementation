@@ -43,7 +43,7 @@ export async function POST(
     })
 
     const applyUrl = application.job.applyUrl ?? ''
-    let nextStatus: ApplicationStatus = ApplicationStatus.FAILED
+    let nextStatus: ApplicationStatus = ApplicationStatus.NEEDS_REVIEW
     let errorMessage: string | null = null
 
     try {
@@ -71,7 +71,7 @@ export async function POST(
           result.status === 'applied'                      ? ApplicationStatus.APPLIED
           : (result.pendingQuestions?.length ?? 0) > 0     ? ApplicationStatus.NEEDS_INFO
           : result.status === 'needs_review'               ? ApplicationStatus.NEEDS_REVIEW
-          : ApplicationStatus.FAILED
+          : ApplicationStatus.NEEDS_REVIEW
         errorMessage = result.errorMessage ?? null
       } else {
         errorMessage = `ApplyPilot HTTP ${res.status}`
@@ -100,7 +100,7 @@ export async function POST(
       await prisma.application.update({
         where: { id: params.id },
         data: {
-          status: ApplicationStatus.FAILED,
+          status: ApplicationStatus.NEEDS_REVIEW,
           errorMessage: err instanceof Error ? err.message : 'Unknown error',
         },
       })

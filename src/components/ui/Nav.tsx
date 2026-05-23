@@ -36,6 +36,7 @@ export function Nav() {
         {[
           { href: '/', label: 'Discover' },
           { href: '/dashboard', label: 'Applications' },
+          { href: '/inbox', label: 'Inbox' },
         ].map(({ href, label }) => (
           <Link
             key={href}
