@@ -135,17 +135,31 @@ function classify(subject: string, body: string): EmailCategory {
 }
 
 // Verification code extraction waterfall.
+//
+// Order matters: Greenhouse-specific anchors first (their email literally
+// says "copy and paste this code into your application: XXXXXXXX"), then
+// generic label-anchored patterns, then fallbacks. The blocklist filters
+// out obvious non-codes like years (2025/2026) and label words.
+//
+// MUST stay in sync with scripts/backfill-verification-codes.ts.
 const CODE_PATTERNS: RegExp[] = [
-  /\b(\d{6})\b/,
-  /\b(\d{4})\b/,
-  /code[:\s]+([A-Z0-9]{6,10})/i,
-  /token[:\s]+([A-Z0-9]{8,20})/i,
+  /paste this code[^]*?application:\s*([A-Za-z0-9]{8})\s*[\r\n]+[^]*?after you enter the code/i,
+  /paste this code[^:]*:\s*([A-Za-z0-9]{8})\b/i,
+  /security code[^:]*:\s*([A-Za-z0-9]{8})\b/i,
+  /your (?:verification |security |one[\s-]?time )?code is[:\s]+([A-Za-z0-9]{6,16})/i,
+  /\bcode[:\s]+([A-Za-z0-9]{8,16})\b/i,
+  /\btoken[:\s]+([A-Za-z0-9]{8,20})\b/i,
 ]
+const CODE_BLOCKLIST = /^(\d{1,4}|20\d{2}|19\d{2}|verification|security|greenhouse|code|token|copy)$/i
 
 export function extractVerificationCode(body: string): string | null {
   for (const re of CODE_PATTERNS) {
     const m = body.match(re)
-    if (m?.[1]) return m[1]
+    const candidate = m?.[1]
+    if (candidate && !CODE_BLOCKLIST.test(candidate)) {
+      console.log(`Retrieved verification code: ${candidate}`)
+      return candidate
+    }
   }
   return null
 }
@@ -318,14 +332,33 @@ export async function getVerificationCode(
     return row?.verificationCode ?? null
   }
 
+  // Active polling: re-sync Gmail on every iteration so the verification
+  // email is pulled in within seconds of arriving instead of waiting up to
+  // 5 minutes for the next cron tick. Syncs run in the background so they
+  // don't block the DB lookup — the next poll picks up whatever the prior
+  // sync wrote.
+  let inFlightSync: Promise<unknown> | null = null
   while (Date.now() < deadline) {
     const code = await findCode()
     if (code) return code
+
+    if (!inFlightSync) {
+      inFlightSync = syncGmailInbox(userId)
+        .catch(err => {
+          console.warn('[getVerificationCode] Background sync failed:', err instanceof Error ? err.message : String(err))
+        })
+        .finally(() => {
+          inFlightSync = null
+        })
+    }
+
     await new Promise(r => setTimeout(r, pollIntervalMs))
   }
 
-  // Final attempt — trigger a fresh sync and check once more.
+  // Final attempt — wait for any in-flight sync, then trigger one last
+  // synchronous sync and check once more.
   try {
+    if (inFlightSync) await inFlightSync
     await syncGmailInbox(userId)
   } catch (err) {
     console.warn('[getVerificationCode] Final sync failed:', err instanceof Error ? err.message : String(err))

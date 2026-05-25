@@ -226,18 +226,25 @@ function detectCategory(subject: string, body: string, from: string): EmailCateg
   return 'primary'
 }
 
-// Regex for verification codes: 6-digit numbers or 6-10 char alphanumeric codes
-const CODE_PATTERNS = [
-  /\b(\d{6})\b/,
-  /\b([A-Za-z0-9]{6,10})\b(?=\s*(?:is your|verification|security|one.time|code))/i,
-  /(?:code|pin|token|password)[^\w]?\s*[:\-]?\s*([A-Za-z0-9]{4,10})/i,
+// MUST stay in sync with src/lib/gmail/inboxSync.ts CODE_PATTERNS / CODE_BLOCKLIST.
+const CODE_PATTERNS: RegExp[] = [
+  /paste this code[^]*?application:\s*([A-Za-z0-9]{8})\s*[\r\n]+[^]*?after you enter the code/i,
+  /paste this code[^:]*:\s*([A-Za-z0-9]{8})\b/i,
+  /security code[^:]*:\s*([A-Za-z0-9]{8})\b/i,
+  /your (?:verification |security |one[\s-]?time )?code is[:\s]+([A-Za-z0-9]{6,16})/i,
+  /\bcode[:\s]+([A-Za-z0-9]{8,16})\b/i,
+  /\btoken[:\s]+([A-Za-z0-9]{8,20})\b/i,
 ]
+
+const CODE_BLOCKLIST = /^(\d{1,4}|20\d{2}|19\d{2}|verification|security|greenhouse|code|token|copy)$/i
 
 function extractVerificationCode(body: string): string | null {
   for (const pattern of CODE_PATTERNS) {
     const match = body.match(pattern)
-    if (match?.[1]) {
-      return match[1]
+    const candidate = match?.[1]
+    if (candidate && !CODE_BLOCKLIST.test(candidate)) {
+      console.log(`Retrieved verification code: ${candidate}`)
+      return candidate
     }
   }
   return null

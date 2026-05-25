@@ -41,7 +41,7 @@ Return ONLY the answer text, nothing else.`
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-6',
       max_tokens: 300,
       messages: [{ role: 'user', content: prompt }],
     })
@@ -146,7 +146,7 @@ Only include fields with confidence above 0.7.`
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-6',
       max_tokens: 2000,
       messages: [{ role: 'user', content: prompt }],
     })
@@ -348,7 +348,7 @@ export async function generateSalaryAnswer(
 
   try {
     const response = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-6',
       max_tokens: 30,
       messages: [{ role: 'user', content: prompt }],
     })

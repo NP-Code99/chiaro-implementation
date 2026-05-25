@@ -22,7 +22,7 @@ import { scrapflyApplyWellfound } from './scrapflyApply'
 import { createOutcomeLogger, type OutcomeLogger, type FieldType } from './outcomeLogger'
 import { getVerificationCode, syncGmailInbox } from './gmail/inboxSync'
 
-const TOTAL_TIMEOUT_MS = 300_000  // 5 min — warm-up (homepage→jobs→job page) + CF/DataDome + form fill
+const TOTAL_TIMEOUT_MS = 600_000  // 10 min — warm-up (homepage→jobs→job page) + CF/DataDome + form fill + email verification round-trip
 const MAX_STEPS = 8
 
 
@@ -432,31 +432,70 @@ async function tryGreenhouseAutoVerify(
 
   console.log(`[browserApply] Retrieved Greenhouse verification code from Gmail (${code.length} chars)`)
 
-  // Try a small set of selectors for the verification input. Greenhouse uses a
-  // single text input on the verification page.
-  const selectors = [
-    'input[autocomplete="one-time-code"]',
-    'input[name*="verification" i]',
-    'input[id*="verification" i]',
-    'input[name*="code" i]',
-    'input[id*="code" i]',
-    'input[maxlength="8"]',
-    'input[type="text"]',
-  ]
-
+  // Greenhouse's newer verification UI renders the 8-char security code as
+  // 8 separate single-character boxes (typically maxlength="1"). The older UI
+  // used a single text input. Handle the multi-box case first since that's
+  // what production Greenhouse shows today.
   let typed = false
-  for (const sel of selectors) {
-    const input = page.locator(sel).first()
-    if (await input.count().catch(() => 0) === 0) continue
-    try {
-      await input.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
-      await input.click({ timeout: 3000 }).catch(() => {})
-      await input.fill('', { timeout: 2000 }).catch(() => {})
-      await input.type(code, { delay: 60, timeout: 5000 })
-      typed = true
-      break
-    } catch {
-      continue
+
+  // Strategy 1: multi-box OTP — find the 8 single-char boxes near the
+  // "Security code" / "verification code was sent" copy, click the leftmost,
+  // then type each character so the page's auto-advance logic moves focus.
+  try {
+    const boxLocator = page.locator(
+      'input[maxlength="1"][type="text"], input[maxlength="1"][type="tel"], input[maxlength="1"][inputmode="numeric"], input[maxlength="1"]'
+    )
+    const boxCount = await boxLocator.count().catch(() => 0)
+    if (boxCount >= code.length) {
+      // Filter to only visible boxes to avoid hidden/leftover inputs
+      const visibleBoxes: import('playwright').Locator[] = []
+      for (let i = 0; i < boxCount && visibleBoxes.length < code.length; i++) {
+        const box = boxLocator.nth(i)
+        if (await box.isVisible().catch(() => false)) {
+          visibleBoxes.push(box)
+        }
+      }
+      if (visibleBoxes.length >= code.length) {
+        const first = visibleBoxes[0]
+        await first.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+        await first.click({ timeout: 3000 })
+        await first.focus({ timeout: 2000 }).catch(() => {})
+        // Type character by character on the focused element so the OTP
+        // component's onChange handler advances focus to the next box.
+        for (const ch of code) {
+          await page.keyboard.type(ch, { delay: 80 })
+        }
+        typed = true
+        console.log(`[browserApply] Typed ${code.length}-char code into ${visibleBoxes.length} OTP boxes`)
+      }
+    }
+  } catch (err) {
+    console.warn('[browserApply] Multi-box OTP fill failed, will try single-input fallback:', err)
+  }
+
+  // Strategy 2: legacy single-input fallback.
+  if (!typed) {
+    const selectors = [
+      'input[autocomplete="one-time-code"]',
+      'input[name*="verification" i]',
+      'input[id*="verification" i]',
+      'input[name*="code" i]',
+      'input[id*="code" i]',
+      'input[maxlength="8"]',
+    ]
+    for (const sel of selectors) {
+      const input = page.locator(sel).first()
+      if (await input.count().catch(() => 0) === 0) continue
+      try {
+        await input.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+        await input.click({ timeout: 3000 }).catch(() => {})
+        await input.fill('', { timeout: 2000 }).catch(() => {})
+        await input.type(code, { delay: 60, timeout: 5000 })
+        typed = true
+        break
+      } catch {
+        continue
+      }
     }
   }
 
@@ -465,27 +504,79 @@ async function tryGreenhouseAutoVerify(
     return { code, submitted: false }
   }
 
-  // Click any visible submit button
+  // Allow the OTP component to fire its onChange/validate handlers so the
+  // submit button transitions from disabled → enabled. Without this delay
+  // the click below lands on a disabled button and is silently swallowed,
+  // leaving the user stuck on the challenge screen.
+  await page.waitForTimeout(800)
+  await page.keyboard.press('Tab').catch(() => {})
+  await page.waitForTimeout(400)
+
   const submitSelectors = [
+    'button:has-text("Submit application")',
+    'button:has-text("Verify")',
+    'button:has-text("Confirm")',
+    'button:has-text("Submit")',
+    'button:has-text("Continue")',
     'button[type="submit"]',
     'input[type="submit"]',
-    'button:has-text("Verify")',
-    'button:has-text("Submit")',
-    'button:has-text("Confirm")',
-    'button:has-text("Continue")',
   ]
-  for (const sel of submitSelectors) {
-    const btn = page.locator(sel).first()
-    if (await btn.count().catch(() => 0) === 0) continue
-    try {
-      await btn.click({ timeout: 3000 })
-      break
-    } catch {
-      continue
+
+  const challengeStillVisible = async (): Promise<boolean> => {
+    const t = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '')
+    return /verification code was sent|enter the 8.character code|security code/.test(t)
+  }
+
+  const clickFirstMatchingSubmit = async (): Promise<boolean> => {
+    for (const sel of submitSelectors) {
+      const btn = page.locator(sel).first()
+      if (await btn.count().catch(() => 0) === 0) continue
+      // Wait for the button to be enabled (Greenhouse disables it until the
+      // OTP value passes client-side validation).
+      try {
+        await btn.waitFor({ state: 'visible', timeout: 3000 })
+      } catch {
+        continue
+      }
+      const enabledAt = Date.now()
+      while (Date.now() - enabledAt < 4000) {
+        const disabled = await btn.isDisabled().catch(() => false)
+        if (!disabled) break
+        await page.waitForTimeout(200)
+      }
+      try {
+        await btn.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {})
+        await btn.click({ timeout: 3000 })
+        console.log(`[browserApply] Clicked verification submit via "${sel}"`)
+        return true
+      } catch {
+        continue
+      }
     }
+    return false
+  }
+
+  let clicked = await clickFirstMatchingSubmit()
+  if (!clicked) {
+    // Last-resort: press Enter on the focused OTP box.
+    await page.keyboard.press('Enter').catch(() => {})
+    console.log('[browserApply] Verification submit not found — pressed Enter as fallback')
   }
 
   await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+
+  // Some Greenhouse builds need a second click — the first click only validates
+  // the code, the second actually submits the application. Retry once if the
+  // challenge text is still on screen.
+  if (await challengeStillVisible()) {
+    console.log('[browserApply] Challenge still visible after first submit — retrying click')
+    clicked = await clickFirstMatchingSubmit()
+    if (!clicked) {
+      await page.keyboard.press('Enter').catch(() => {})
+    }
+    await page.waitForLoadState('networkidle', { timeout: 10_000 }).catch(() => {})
+  }
+
   return { code, submitted: true }
 }
 
@@ -855,7 +946,7 @@ export async function browserApply(
       const session = await steel.sessions.create({
         useProxy: true,      // Steel's built-in residential proxy pool
         solveCaptcha: true,  // auto-solve Cloudflare Turnstile
-        timeout: 420000,     // 7 min — CF bypass alone can take 80s
+        timeout: 600000,     // 10 min — matches TOTAL_TIMEOUT_MS so Steel doesn't cut us off early
       })
       console.log('[browserApply] Steel: useProxy=true + solveCaptcha=true')
       steelSessionId = session.id
@@ -4424,7 +4515,7 @@ export async function browserApply(
       run(),
       new Promise<BrowserApplyResult>(resolve =>
         setTimeout(
-          () => resolve({ status: 'needs_review', errorMessage: 'Timed out after 5 minutes', applyUrl }),
+          () => resolve({ status: 'needs_review', errorMessage: 'Timed out after 10 minutes', applyUrl }),
           TOTAL_TIMEOUT_MS,
         )
       ),
