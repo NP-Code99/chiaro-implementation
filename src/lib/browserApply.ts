@@ -898,9 +898,18 @@ export async function browserApply(
 
     // ── STEP 6: Browser launch — route by ATS type ───────────────────────────────
     // Browser routing:
-    //   • Greenhouse  → CloakBrowser + CapSolver (reCAPTCHA Enterprise requires C++-patched browser)
-    //   • Everything else (Lever, BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
+    //   • Greenhouse  → Steel.dev + CapSolver reCAPTCHA Enterprise intercept (mobile-replicable path)
+    //   • Everything else (Lever excepted, BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
+    //   • Lever       → CloakBrowser (hCaptcha — Steel solver fails, CapSolver doesn't support it)
     //   • Native Wellfound → CloakBrowser (DataDome path — unchanged)
+    //
+    // Greenhouse-on-Steel safety: the reCAPTCHA Enterprise score gate is bypassed via the
+    // grecaptcha.enterprise.execute() intercept installed below (see "Greenhouse reCAPTCHA
+    // Enterprise intercept" block). That intercept routes the call to CapSolver Enterprise
+    // BEFORE Greenhouse ever sees a low-score token from the cloud browser — so we don't
+    // trigger spam suppression or land in email-verify limbo. Scrapfly-warmed cookies,
+    // stealth init scripts, and the Gmail verification fallback all apply regardless of
+    // whether the underlying browser is Steel or CloakBrowser.
     //
     // Use ALL available signals — effectiveUrl may still be a startup.jobs URL if Scrapfly
     // failed to resolve it, so fall back to the DB atsType and the original applyUrl.
@@ -934,7 +943,11 @@ export async function browserApply(
     // Lever uses hCaptcha which Steel's auto-solver fails on, and CapSolver does not support
     // hCaptcha. Route Lever through CloakBrowser (49 C++ stealth patches) so hCaptcha either
     // doesn't trigger at all, or is passable without a dedicated solver.
-    const useSteel = !isGreenhouseUrl && !isNativeWellfound && !isLeverUrl && !!steelApiKey
+    //
+    // Greenhouse now also routes to Steel: the CapSolver reCAPTCHA Enterprise intercept
+    // (installed via addInitScript further down) handles the score gate cloud-side, which
+    // means the same flow can be driven from a mobile thin client without losing protections.
+    const useSteel = !isNativeWellfound && !isLeverUrl && !!steelApiKey
     console.log(`[browserApply] ATS routing: db=${dbAtsType ?? 'unknown'} resolved=${resolved.atsType ?? '?'} lever=${isLeverUrl} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
     // Create outcome logger now that ATS type is known
@@ -976,6 +989,19 @@ export async function browserApply(
       browser = await chromium.connectOverCDP(cdpUrl)
       context = browser.contexts()[0] ?? await browser.newContext()
       console.log('[browserApply] Steel browser connected via CDP')
+
+      // Greenhouse's centered form layout is tuned for 1366×768. Steel's default viewport
+      // is wider and causes the form to render left-shifted, which has historically broken
+      // React Select option detection. Resize the default page (and any future page) so
+      // the form filler operates on the same dimensions as the CloakBrowser path.
+      if (isGreenhouseUrl) {
+        for (const p of context.pages()) {
+          await p.setViewportSize({ width: 1366, height: 768 }).catch(() => {})
+        }
+        context.on('page', (p) => {
+          p.setViewportSize({ width: 1366, height: 768 }).catch(() => {})
+        })
+      }
     } else {
       // CloakBrowser patches Chromium at the C++ source level (49 patches) — removes
       // all automation signals, spoofs canvas/WebGL/GPU fingerprints, and auto-resolves
