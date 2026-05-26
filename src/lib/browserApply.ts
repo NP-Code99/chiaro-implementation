@@ -962,14 +962,26 @@ export async function browserApply(
     let context: import('playwright').BrowserContext
 
     if (useSteel) {
+      console.log('[browserApply] ════════════════════════════════════════════════════')
+      console.log('[browserApply] GREENHOUSE-ON-STEEL BUILD: useProxy-disabled + my.greenhouse intercept')
+      console.log('[browserApply] If you do not see this banner, your dev server is running stale code')
+      console.log('[browserApply] ════════════════════════════════════════════════════')
       console.log('[browserApply] Launching Steel.dev cloud browser...')
       const steel = new Steel({ steelAPIKey: steelApiKey })
+      // Greenhouse-specific: disable Steel's residential proxy.
+      // Greenhouse is fronted by Cloudflare and the form submit POST goes from
+      // job-boards.greenhouse.io → boards.greenhouse.io. Residential proxy pools
+      // are scored poorly by CF and have been observed to drop that POST with
+      // net::ERR_FAILED ("Failed to fetch" / "E.json is not a function" in the
+      // Greenhouse client). CloakBrowser also runs Greenhouse without a proxy
+      // (see comment in CloakBrowser branch below) — mirror that here.
+      const useProxyForThisSession = !isGreenhouseUrl
       const session = await steel.sessions.create({
-        useProxy: true,         // Steel's built-in residential proxy pool
-        solveCaptcha: true,     // auto-solve Cloudflare Turnstile
-        timeout: STEEL_TIMEOUT_MS, // 7 min — Steel's hard session cap
+        useProxy: useProxyForThisSession,  // false for Greenhouse, true for everything else
+        solveCaptcha: true,                // auto-solve Cloudflare Turnstile
+        timeout: STEEL_TIMEOUT_MS,         // 7 min — Steel's hard session cap
       })
-      console.log('[browserApply] Steel: useProxy=true + solveCaptcha=true')
+      console.log(`[browserApply] Steel: useProxy=${useProxyForThisSession} + solveCaptcha=true`)
       steelSessionId = session.id
       steelViewUrl = ((session as unknown) as Record<string, unknown>).viewUrl as string ?? null
       bypassMethod = 'steel'
@@ -990,16 +1002,58 @@ export async function browserApply(
       context = browser.contexts()[0] ?? await browser.newContext()
       console.log('[browserApply] Steel browser connected via CDP')
 
-      // Greenhouse's centered form layout is tuned for 1366×768. Steel's default viewport
-      // is wider and causes the form to render left-shifted, which has historically broken
-      // React Select option detection. Resize the default page (and any future page) so
-      // the form filler operates on the same dimensions as the CloakBrowser path.
+      // Greenhouse-on-Steel parity with the CloakBrowser context: match viewport
+      // (1366×768 — the form's tuned width, anything wider breaks React Select detection).
+      // Timezone emulation (America/New_York) would also be nice for reCAPTCHA scoring
+      // consistency, but Page.emulateTimezone is not available over CDP — we guard the
+      // call and skip silently if the method is missing.
       if (isGreenhouseUrl) {
+        // Suppress my.greenhouse.io/users/* UnauthorizedError.
+        // Greenhouse's embedded form calls Gs.fetchProfile() against the candidate
+        // portal (my.greenhouse.io) on page load to pre-fill returning candidates.
+        // Since the bot isn't signed into that portal, the request returns 401,
+        // fetchProfile throws UnauthorizedError, and Greenhouse's React error
+        // boundary surfaces "There was an error processing your application" on
+        // the page — blocking submission even though the form itself is fine.
+        // Intercept the request and respond with a clean 200 + null-user body so
+        // the client takes the not-signed-in branch silently. Scope is narrow —
+        // /users/ only on my.greenhouse.io, every other request flows untouched.
+        try {
+          await context.route(/https?:\/\/my\.greenhouse\.io\/users\//i, async (route) => {
+            try {
+              await route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ user: null }),
+              })
+              console.log('[browserApply] Stubbed my.greenhouse.io/users/* with not-signed-in response')
+            } catch {
+              await route.continue().catch(() => {})
+            }
+          })
+        } catch (err) {
+          console.warn('[browserApply] Could not install my.greenhouse.io intercept:', err)
+        }
+        const applyGreenhouseEmulation = async (p: import('playwright').Page) => {
+          try {
+            await p.setViewportSize({ width: 1366, height: 768 })
+          } catch {
+            // viewport set failure is non-fatal — form still works at Steel default
+          }
+          const maybeEmulate = (p as unknown as { emulateTimezone?: (tz: string) => Promise<void> }).emulateTimezone
+          if (typeof maybeEmulate === 'function') {
+            try {
+              await maybeEmulate.call(p, 'America/New_York')
+            } catch {
+              // Steel/CDP may reject this — non-fatal, skip
+            }
+          }
+        }
         for (const p of context.pages()) {
-          await p.setViewportSize({ width: 1366, height: 768 }).catch(() => {})
+          await applyGreenhouseEmulation(p)
         }
         context.on('page', (p) => {
-          p.setViewportSize({ width: 1366, height: 768 }).catch(() => {})
+          applyGreenhouseEmulation(p).catch(() => {})
         })
       }
     } else {
