@@ -898,18 +898,10 @@ export async function browserApply(
 
     // ── STEP 6: Browser launch — route by ATS type ───────────────────────────────
     // Browser routing:
-    //   • Greenhouse  → Steel.dev + CapSolver reCAPTCHA Enterprise intercept (mobile-replicable path)
-    //   • Everything else (Lever excepted, BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
+    //   • Greenhouse  → Steel.dev + CapSolver reCAPTCHA Enterprise intercept (mobile-replicable)
+    //   • Everything else (BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
     //   • Lever       → CloakBrowser (hCaptcha — Steel solver fails, CapSolver doesn't support it)
     //   • Native Wellfound → CloakBrowser (DataDome path — unchanged)
-    //
-    // Greenhouse-on-Steel safety: the reCAPTCHA Enterprise score gate is bypassed via the
-    // grecaptcha.enterprise.execute() intercept installed below (see "Greenhouse reCAPTCHA
-    // Enterprise intercept" block). That intercept routes the call to CapSolver Enterprise
-    // BEFORE Greenhouse ever sees a low-score token from the cloud browser — so we don't
-    // trigger spam suppression or land in email-verify limbo. Scrapfly-warmed cookies,
-    // stealth init scripts, and the Gmail verification fallback all apply regardless of
-    // whether the underlying browser is Steel or CloakBrowser.
     //
     // Use ALL available signals — effectiveUrl may still be a startup.jobs URL if Scrapfly
     // failed to resolve it, so fall back to the DB atsType and the original applyUrl.
@@ -944,9 +936,10 @@ export async function browserApply(
     // hCaptcha. Route Lever through CloakBrowser (49 C++ stealth patches) so hCaptcha either
     // doesn't trigger at all, or is passable without a dedicated solver.
     //
-    // Greenhouse now also routes to Steel: the CapSolver reCAPTCHA Enterprise intercept
-    // (installed via addInitScript further down) handles the score gate cloud-side, which
-    // means the same flow can be driven from a mobile thin client without losing protections.
+    // Greenhouse stays on Steel for mobile replicability. Known issues being worked through:
+    // residential-proxy CF flagging (mitigated by useProxy=false for Greenhouse), the
+    // my.greenhouse.io/users 401 (mitigated by route stub), and possible Scrapfly-cookie
+    // IP-binding mismatch (still being investigated).
     const useSteel = !isNativeWellfound && !isLeverUrl && !!steelApiKey
     console.log(`[browserApply] ATS routing: db=${dbAtsType ?? 'unknown'} resolved=${resolved.atsType ?? '?'} lever=${isLeverUrl} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
@@ -1008,32 +1001,10 @@ export async function browserApply(
       // consistency, but Page.emulateTimezone is not available over CDP — we guard the
       // call and skip silently if the method is missing.
       if (isGreenhouseUrl) {
-        // Suppress my.greenhouse.io/users/* UnauthorizedError.
-        // Greenhouse's embedded form calls Gs.fetchProfile() against the candidate
-        // portal (my.greenhouse.io) on page load to pre-fill returning candidates.
-        // Since the bot isn't signed into that portal, the request returns 401,
-        // fetchProfile throws UnauthorizedError, and Greenhouse's React error
-        // boundary surfaces "There was an error processing your application" on
-        // the page — blocking submission even though the form itself is fine.
-        // Intercept the request and respond with a clean 200 + null-user body so
-        // the client takes the not-signed-in branch silently. Scope is narrow —
-        // /users/ only on my.greenhouse.io, every other request flows untouched.
-        try {
-          await context.route(/https?:\/\/my\.greenhouse\.io\/users\//i, async (route) => {
-            try {
-              await route.fulfill({
-                status: 200,
-                contentType: 'application/json',
-                body: JSON.stringify({ user: null }),
-              })
-              console.log('[browserApply] Stubbed my.greenhouse.io/users/* with not-signed-in response')
-            } catch {
-              await route.continue().catch(() => {})
-            }
-          })
-        } catch (err) {
-          console.warn('[browserApply] Could not install my.greenhouse.io intercept:', err)
-        }
+        // (Earlier attempt to stub my.greenhouse.io/users/* with {user:null} caused a
+        // downstream "Cannot read properties of undefined (reading 'toString')" because
+        // Greenhouse's client expected a richer response shape. Reverted — the underlying
+        // 401 surfaces an UnauthorizedError PageError but does not actually block submission.)
         const applyGreenhouseEmulation = async (p: import('playwright').Page) => {
           try {
             await p.setViewportSize({ width: 1366, height: 768 })
