@@ -898,9 +898,8 @@ export async function browserApply(
 
     // ── STEP 6: Browser launch — route by ATS type ───────────────────────────────
     // Browser routing:
-    //   • Greenhouse  → Steel.dev + CapSolver reCAPTCHA Enterprise intercept (mobile-replicable)
-    //   • Everything else (BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
-    //   • Lever       → CloakBrowser (hCaptcha — Steel solver fails, CapSolver doesn't support it)
+    //   • Greenhouse  → CloakBrowser + CapSolver (reCAPTCHA Enterprise requires C++-patched browser)
+    //   • Everything else (Lever, BambooHR, Workday, Ashby, etc.) → Steel.dev + CapSolver
     //   • Native Wellfound → CloakBrowser (DataDome path — unchanged)
     //
     // Use ALL available signals — effectiveUrl may still be a startup.jobs URL if Scrapfly
@@ -935,12 +934,7 @@ export async function browserApply(
     // Lever uses hCaptcha which Steel's auto-solver fails on, and CapSolver does not support
     // hCaptcha. Route Lever through CloakBrowser (49 C++ stealth patches) so hCaptcha either
     // doesn't trigger at all, or is passable without a dedicated solver.
-    //
-    // Greenhouse stays on Steel for mobile replicability. Known issues being worked through:
-    // residential-proxy CF flagging (mitigated by useProxy=false for Greenhouse), the
-    // my.greenhouse.io/users 401 (mitigated by route stub), and possible Scrapfly-cookie
-    // IP-binding mismatch (still being investigated).
-    const useSteel = !isNativeWellfound && !isLeverUrl && !!steelApiKey
+    const useSteel = !isGreenhouseUrl && !isNativeWellfound && !isLeverUrl && !!steelApiKey
     console.log(`[browserApply] ATS routing: db=${dbAtsType ?? 'unknown'} resolved=${resolved.atsType ?? '?'} lever=${isLeverUrl} → ${useSteel ? 'Steel.dev' : 'CloakBrowser'} (url: ${effectiveUrl.slice(0, 60)})`)
 
     // Create outcome logger now that ATS type is known
@@ -955,26 +949,14 @@ export async function browserApply(
     let context: import('playwright').BrowserContext
 
     if (useSteel) {
-      console.log('[browserApply] ════════════════════════════════════════════════════')
-      console.log('[browserApply] GREENHOUSE-ON-STEEL BUILD: useProxy-disabled + my.greenhouse intercept')
-      console.log('[browserApply] If you do not see this banner, your dev server is running stale code')
-      console.log('[browserApply] ════════════════════════════════════════════════════')
       console.log('[browserApply] Launching Steel.dev cloud browser...')
       const steel = new Steel({ steelAPIKey: steelApiKey })
-      // Greenhouse-specific: disable Steel's residential proxy.
-      // Greenhouse is fronted by Cloudflare and the form submit POST goes from
-      // job-boards.greenhouse.io → boards.greenhouse.io. Residential proxy pools
-      // are scored poorly by CF and have been observed to drop that POST with
-      // net::ERR_FAILED ("Failed to fetch" / "E.json is not a function" in the
-      // Greenhouse client). CloakBrowser also runs Greenhouse without a proxy
-      // (see comment in CloakBrowser branch below) — mirror that here.
-      const useProxyForThisSession = !isGreenhouseUrl
       const session = await steel.sessions.create({
-        useProxy: useProxyForThisSession,  // false for Greenhouse, true for everything else
-        solveCaptcha: true,                // auto-solve Cloudflare Turnstile
-        timeout: STEEL_TIMEOUT_MS,         // 7 min — Steel's hard session cap
+        useProxy: true,         // Steel's built-in residential proxy pool
+        solveCaptcha: true,     // auto-solve Cloudflare Turnstile
+        timeout: STEEL_TIMEOUT_MS, // 7 min — Steel's hard session cap
       })
-      console.log(`[browserApply] Steel: useProxy=${useProxyForThisSession} + solveCaptcha=true`)
+      console.log('[browserApply] Steel: useProxy=true + solveCaptcha=true')
       steelSessionId = session.id
       steelViewUrl = ((session as unknown) as Record<string, unknown>).viewUrl as string ?? null
       bypassMethod = 'steel'
@@ -994,39 +976,6 @@ export async function browserApply(
       browser = await chromium.connectOverCDP(cdpUrl)
       context = browser.contexts()[0] ?? await browser.newContext()
       console.log('[browserApply] Steel browser connected via CDP')
-
-      // Greenhouse-on-Steel parity with the CloakBrowser context: match viewport
-      // (1366×768 — the form's tuned width, anything wider breaks React Select detection).
-      // Timezone emulation (America/New_York) would also be nice for reCAPTCHA scoring
-      // consistency, but Page.emulateTimezone is not available over CDP — we guard the
-      // call and skip silently if the method is missing.
-      if (isGreenhouseUrl) {
-        // (Earlier attempt to stub my.greenhouse.io/users/* with {user:null} caused a
-        // downstream "Cannot read properties of undefined (reading 'toString')" because
-        // Greenhouse's client expected a richer response shape. Reverted — the underlying
-        // 401 surfaces an UnauthorizedError PageError but does not actually block submission.)
-        const applyGreenhouseEmulation = async (p: import('playwright').Page) => {
-          try {
-            await p.setViewportSize({ width: 1366, height: 768 })
-          } catch {
-            // viewport set failure is non-fatal — form still works at Steel default
-          }
-          const maybeEmulate = (p as unknown as { emulateTimezone?: (tz: string) => Promise<void> }).emulateTimezone
-          if (typeof maybeEmulate === 'function') {
-            try {
-              await maybeEmulate.call(p, 'America/New_York')
-            } catch {
-              // Steel/CDP may reject this — non-fatal, skip
-            }
-          }
-        }
-        for (const p of context.pages()) {
-          await applyGreenhouseEmulation(p)
-        }
-        context.on('page', (p) => {
-          applyGreenhouseEmulation(p).catch(() => {})
-        })
-      }
     } else {
       // CloakBrowser patches Chromium at the C++ source level (49 patches) — removes
       // all automation signals, spoofs canvas/WebGL/GPU fingerprints, and auto-resolves
