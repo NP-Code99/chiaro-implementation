@@ -23,6 +23,11 @@ import { createOutcomeLogger, type OutcomeLogger, type FieldType } from './outco
 import { getVerificationCode, syncGmailInbox } from './gmail/inboxSync'
 
 const TOTAL_TIMEOUT_MS = 600_000  // 10 min — warm-up (homepage→jobs→job page) + CF/DataDome + form fill + email verification round-trip
+// Steel.dev sessions are capped at 7 minutes. We pass this as the session timeout and
+// also use it to bail out of the run early (with a buffer) so we can release the
+// session and flush logs before Steel kills the connection.
+const STEEL_TIMEOUT_MS = 420_000        // 7 min hard cap on Steel sessions
+const STEEL_GRACEFUL_BUFFER_MS = 20_000 // bail ~20s before the cap to release cleanly
 const MAX_STEPS = 8
 
 
@@ -683,6 +688,9 @@ export async function browserApply(
   let browser: any = null
   let steelSessionId: string | null = null
   let steelViewUrl: string | null = null
+  let steelBailTimer: ReturnType<typeof setTimeout> | null = null
+  type SteelBailResolver = (r: BrowserApplyResult) => void
+  let resolveSteelBail: SteelBailResolver | null = null
   let outcomeLogger: OutcomeLogger | null = null
   const applyStartedAt = new Date()
 
@@ -944,15 +952,25 @@ export async function browserApply(
       console.log('[browserApply] Launching Steel.dev cloud browser...')
       const steel = new Steel({ steelAPIKey: steelApiKey })
       const session = await steel.sessions.create({
-        useProxy: true,      // Steel's built-in residential proxy pool
-        solveCaptcha: true,  // auto-solve Cloudflare Turnstile
-        timeout: 600000,     // 10 min — matches TOTAL_TIMEOUT_MS so Steel doesn't cut us off early
+        useProxy: true,         // Steel's built-in residential proxy pool
+        solveCaptcha: true,     // auto-solve Cloudflare Turnstile
+        timeout: STEEL_TIMEOUT_MS, // 7 min — Steel's hard session cap
       })
       console.log('[browserApply] Steel: useProxy=true + solveCaptcha=true')
       steelSessionId = session.id
       steelViewUrl = ((session as unknown) as Record<string, unknown>).viewUrl as string ?? null
       bypassMethod = 'steel'
       console.log(`[browserApply] Steel session created: ${steelSessionId}`)
+
+      steelBailTimer = setTimeout(() => {
+        console.warn(`[browserApply] Steel session approaching ${STEEL_TIMEOUT_MS / 1000}s cap — bailing out gracefully`)
+        resolveSteelBail?.({
+          status: 'needs_review',
+          errorMessage: `Steel session approaching ${STEEL_TIMEOUT_MS / 1000}s cap`,
+          applyUrl,
+          bypassMethod,
+        })
+      }, STEEL_TIMEOUT_MS - STEEL_GRACEFUL_BUFFER_MS)
 
       const cdpUrl = `${session.websocketUrl}&apiKey=${steelApiKey}`
       browser = await chromium.connectOverCDP(cdpUrl)
@@ -4265,7 +4283,18 @@ export async function browserApply(
             const afterText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '')
             const stillChallenged = /verification code was sent|enter the 8.character code|security code/i.test(afterText)
             if (!stillChallenged) {
-              // Fall through to standard success detection below
+              // Verification cleared. Greenhouse's post-verify confirmation
+              // page (e.g. "Application submitted") often doesn't match the
+              // generic SUCCESS_PATTERNS, so flip directly to applied here.
+              const verifiedScreenshot = await takeScreenshot(page, `verified-applied-${applicationId}`)
+              console.log('[browserApply] Greenhouse challenge cleared post-verify — marking as applied')
+              return {
+                status: 'applied',
+                applyUrl,
+                screenshotUrl: verifiedScreenshot ?? postSubmitUrl,
+                preSubmitScreenshotUrl: preSubmitUrl,
+                bypassMethod,
+              }
             } else {
               return {
                 status: 'needs_review',
@@ -4519,6 +4548,9 @@ export async function browserApply(
           TOTAL_TIMEOUT_MS,
         )
       ),
+      new Promise<BrowserApplyResult>(resolve => {
+        resolveSteelBail = resolve
+      }),
     ])
   } catch (err) {
     result = {
@@ -4527,6 +4559,7 @@ export async function browserApply(
       applyUrl,
     }
   } finally {
+    if (steelBailTimer) clearTimeout(steelBailTimer)
     await browser?.close().catch(() => {})
     if (steelSessionId && process.env.STEEL_API_KEY) {
       const steel = new Steel({ steelAPIKey: process.env.STEEL_API_KEY })
